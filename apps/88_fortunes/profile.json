@@ -1,0 +1,120 @@
+{
+  "name": "88 Fortunes",
+  "package": "com.ballytechnologies.f88",
+  "activity": "com.unity3d.player.UnityPlayerActivity",
+  "launch_wait": 50,
+  "screen": [
+    1280,
+    720
+  ],
+  "lobby_marker": "lobby_gear",
+  "ingame_marker": "ingame_totalbet",
+  "spin_btn": "spin_btn",
+  "spin_xy": [
+    648,
+    1215
+  ],
+  "bet_minus_xy": [
+    478,
+    1138
+  ],
+  "bet_minus_taps": 15,
+  "play_btn": null,
+  "low_coins": null,
+  "x_templates": [
+    "x_green",
+    "x_gold"
+  ],
+  "dismiss_templates": [
+    [
+      "btn_leave_no",
+      0.85
+    ],
+    [
+      "btn_guest",
+      0.85
+    ],
+    [
+      "btn_accept_tos",
+      0.85
+    ],
+    [
+      "daily_wheel_spin",
+      0.8
+    ],
+    [
+      "btn_great",
+      0.8
+    ]
+  ],
+  "lobby_scan": {
+    "rewind_swipe": [
+      300,
+      300,
+      1100,
+      300,
+      150
+    ],
+    "rewind_times": 12,
+    "step_swipe": [
+      900,
+      300,
+      500,
+      300,
+      1500
+    ],
+    "max_steps": 40,
+    "region": [
+      0,
+      140,
+      1280,
+      540
+    ],
+    "threshold": 0.6
+  },
+  "reset": "new_instance",
+  "notes": "Lobby landscape 1280x720, slots portrait 720x1280. Min bet 200,000,000. NO working account reset (tested 2026-11-13 on emulator 1): pm clear AND new androidid/imei+reboot both log back into the SAME guest account; only a brand-new emulator instance got a new account (LVL 1, 42.5B, Dragon Trio appears in the lobby at ~level 6 after ~150 spins in Huff N Puff -> 'leveling' kept for that case). Out of coins (balance < 5 bets) -> reset 'new_instance': brand-new LDPlayer instance (SR_*), app from apk_cache, guest onboarding, leveling to ~6, continue; if that fails -> stop and keep the video (config new_instance_reset=false -> always stop). Level-up rewards grow the balance (42.5B -> 101B by LVL 17). BACK in the lobby opens 'leave now? Yes/No' -> btn_leave_no. BACK does nothing inside a slot -> exit_slot_xy.",
+  "ocr_safe_extra": [
+    "TRY AGAIN"
+  ],
+  "meters": {
+    "balance": [
+      40,
+      1122,
+      258,
+      1168
+    ],
+    "bet": [
+      500,
+      1122,
+      680,
+      1150
+    ],
+    "level": [
+      260,
+      1160,
+      460,
+      1205
+    ],
+    "level_lobby": [
+      230,
+      660,
+      440,
+      715
+    ]
+  },
+  "bet_plus_xy": [
+    700,
+    1138
+  ],
+  "low_balance_bets": 5,
+  "exit_slot_xy": [
+    297,
+    1127
+  ],
+  "leveling": {
+    "slot": "lvl_slot_huff",
+    "check_from_level": 5,
+    "max_minutes": 40
+  }
+}

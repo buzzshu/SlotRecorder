@@ -1,0 +1,14 @@
+# machine-local / generated - never committed, never packed
+videos/
+logs/
+apk_cache/
+python/
+tools/
+config.json
+python_dir.txt
+STOP
+STOP_*
+__pycache__/
+*.pyc
+*.bak
+*.zip

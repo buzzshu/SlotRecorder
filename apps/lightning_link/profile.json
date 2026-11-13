@@ -1,0 +1,111 @@
+{
+  "name": "Lightning Link",
+  "package": "com.productmadness.lightninglink",
+  "activity": "com.productmadness.application.ApplicationActivity",
+  "launch_wait": 45,
+  "screen": [
+    1280,
+    720
+  ],
+  "lobby_marker": "lobby_home",
+  "ingame_marker": "ingame_totalbet",
+  "spin_btn": "spin_btn",
+  "spin_xy": [
+    355,
+    1225
+  ],
+  "bet_minus_xy": [
+    105,
+    1230
+  ],
+  "bet_minus_taps": 12,
+  "play_btn": "btn_play",
+  "low_coins": "low_coins",
+  "x_templates": [
+    "x_boost",
+    "x_deal",
+    "x_lab",
+    "x_board",
+    "x_season",
+    "x_bonus"
+  ],
+  "dismiss_templates": [
+    [
+      "btn_agree_tos",
+      0.85
+    ],
+    [
+      "tap_to_continue",
+      0.8
+    ],
+    [
+      "tut_bonus_ready",
+      0.8
+    ],
+    [
+      "tut_ff",
+      0.8
+    ],
+    [
+      "wheel_claim",
+      0.8
+    ],
+    [
+      "wheel_continue",
+      0.8
+    ],
+    [
+      "wheel_spin",
+      0.8
+    ],
+    [
+      "lab_claim",
+      0.8
+    ]
+  ],
+  "lobby_scan": {
+    "rewind_swipe": [
+      300,
+      400,
+      1100,
+      400,
+      150
+    ],
+    "rewind_times": 12,
+    "step_swipe": [
+      900,
+      400,
+      400,
+      400,
+      500
+    ],
+    "max_steps": 25,
+    "region": [
+      0,
+      100,
+      1280,
+      600
+    ],
+    "threshold": 0.6
+  },
+  "reset": "pm_clear",
+  "notes": "Lobby is landscape 1280x720, slots are portrait 720x1280. Min bet 10,000. New guest account (pm clear) = 10M coins.",
+  "meters": {
+    "balance": [
+      172,
+      108,
+      345,
+      152
+    ],
+    "bet": [
+      60,
+      1130,
+      250,
+      1172
+    ]
+  },
+  "bet_plus_xy": [
+    200,
+    1230
+  ]
+}
