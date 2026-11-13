@@ -53,15 +53,27 @@ class Gui(tk.Tk):
 
         body = ttk.PanedWindow(self, orient='horizontal'); body.pack(fill='both', expand=True, padx=8, pady=(0, 8))
         left = ttk.Frame(body); body.add(left, weight=1)
-        ttk.Label(left, text='Slot 清單（雙擊「錄」切換勾選、雙擊「分鐘」「名稱」修改）').pack(anchor='w')
-        self.tree = ttk.Treeview(left, columns=('on', 'name', 'min', 'id'), show='headings', height=14)
-        for c, t, w in (('on', '錄', 40), ('name', '名稱', 200), ('min', '分鐘', 55), ('id', '縮圖 id', 150)):
+        ttk.Label(left, text='Slot 清單（雙擊「錄」切換勾選、雙擊「分鐘」「名稱」修改；依大廳順序）').pack(anchor='w')
+        flt = ttk.Frame(left); flt.pack(fill='x', pady=(2, 2))
+        ttk.Label(flt, text='搜尋：').pack(side='left')
+        self.q_var = tk.StringVar(); self.q_var.trace_add('write', lambda *a: self._filter())
+        ttk.Entry(flt, textvariable=self.q_var, width=22).pack(side='left')
+        self.only_on = tk.BooleanVar(value=False)
+        ttk.Checkbutton(flt, text='只看已勾選', variable=self.only_on, command=self._filter).pack(side='left', padx=6)
+        self.count_lbl = ttk.Label(flt, text='', foreground='#555'); self.count_lbl.pack(side='right')
+        tf = ttk.Frame(left); tf.pack(fill='both', expand=True)
+        self.tree = ttk.Treeview(tf, columns=('on', 'name', 'min', 'id'), show='headings', height=12)
+        for c, t, w in (('on', '錄', 40), ('name', '名稱', 230), ('min', '分鐘', 50), ('id', '縮圖 id', 120)):
             self.tree.heading(c, text=t); self.tree.column(c, width=w, anchor='center' if c in ('on', 'min') else 'w')
-        self.tree.pack(fill='both', expand=True); self.tree.bind('<Double-1>', self._tree_dbl)
+        tsb = ttk.Scrollbar(tf, command=self.tree.yview); self.tree.configure(yscrollcommand=tsb.set)
+        tsb.pack(side='right', fill='y'); self.tree.pack(fill='both', expand=True)
+        self.tree.bind('<Double-1>', self._tree_dbl); self.tree.bind('<<TreeviewSelect>>', lambda e: self._show_thumb())
+        self.thumb = ttk.Label(left); self.thumb.pack(anchor='w', pady=(4, 0))
         bt = ttk.Frame(left); bt.pack(fill='x', pady=(6, 2))
         self.btn_add = ttk.Button(bt, text='＋ 新增 slot', command=self._add_slot); self.btn_add.pack(side='left')
         self.btn_del = ttk.Button(bt, text='刪除', command=self._del_slot); self.btn_del.pack(side='left', padx=4)
         self.btn_test = ttk.Button(bt, text='測試尋找', command=self._test_find); self.btn_test.pack(side='left')
+        self.btn_scan = ttk.Button(bt, text='🔍 掃描大廳找新遊戲', command=self._scan_catalog); self.btn_scan.pack(side='left', padx=4)
         bt2 = ttk.LabelFrame(left, text='卡在新彈窗？把它的 X / 按鈕加成範本（錄製中也可以加，馬上生效）', padding=4); bt2.pack(fill='x', pady=4)
         ttk.Button(bt2, text='＋ 從目前畫面框選', command=lambda: self._add_tpl(False)).pack(side='left')
         ttk.Button(bt2, text='＋ 從截圖檔框選', command=lambda: self._add_tpl(True)).pack(side='left', padx=4)
@@ -111,15 +123,46 @@ class Gui(tk.Tk):
     def log(self, s):
         self.logbox.insert('end', s.rstrip() + '\n'); self.logbox.see('end')
     def _load_slots(self):
-        self.tree.delete(*self.tree.get_children()); a = self.app()
+        for i in getattr(self, '_all_ids', []):
+            if self.tree.exists(i): self.tree.delete(i)
+        self.tree.delete(*self.tree.get_children()); a = self.app(); self._all_ids = []
         if not a: return
         for r in a.slots():
             self.tree.insert('', 'end', iid=r['id'], values=('✓' if r.get('enabled', '1') == '1' else '', r['name'], r['minutes'], r['id']))
+            self._all_ids.append(r['id'])
+        self._filter()
+    def _filter(self):
+        """search box / 只看已勾選: detach rows that do not match (they stay in the list and are still saved)"""
+        if not hasattr(self, '_all_ids'): return
+        q = self.q_var.get().strip().lower().replace(' ', '_'); n = 0
+        for k, i in enumerate(self._all_ids):
+            if not self.tree.exists(i): continue
+            show = (not q or q in self.tree.set(i, 'name').lower() or q in i) and (not self.only_on.get() or self.tree.set(i, 'on'))
+            if show: self.tree.reattach(i, '', k); n += 1
+            else: self.tree.detach(i)
+        on = sum(1 for i in self._all_ids if self.tree.exists(i) and self.tree.set(i, 'on'))
+        self.count_lbl['text'] = f'顯示 {n} / 共 {len(self._all_ids)} 款，已勾 {on}'
     def _save_tree(self):
-        rows = [{'id': i, 'name': self.tree.set(i, 'name'), 'minutes': self.tree.set(i, 'min'),
-                 'enabled': '1' if self.tree.set(i, 'on') else '0'} for i in self.tree.get_children()]
-        self.app().save_slots(rows)
+        a = self.app(); old = {r['id']: r for r in a.slots()}          # keep columns the list does not show (hint)
+        rows = [dict(old.get(i, {}), id=i, name=self.tree.set(i, 'name'), minutes=self.tree.set(i, 'min'),
+                     enabled='1' if self.tree.set(i, 'on') else '0') for i in self._all_ids if self.tree.exists(i)]
+        a.save_slots(rows); self._filter()
+    def _show_thumb(self):
+        sel = self.tree.selection(); a = self.app()
+        if not sel or not a: return
+        p = a.t.path(sel[0])
+        if not p: self.thumb.configure(image='', text='（沒有縮圖）'); return
+        import cv2
+        from PIL import Image, ImageTk
+        im = imread(p); h, w = im.shape[:2]; s = 170 / h
+        ph = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(cv2.resize(im, (max(1, int(w * s)), 170)), cv2.COLOR_BGR2RGB)))
+        self.thumb.configure(image=ph, text=''); self.thumb.image = ph
+    def _locked(self):
+        if getattr(self, 'scanning', None) is not None:
+            messagebox.showinfo('掃描中', '正在掃描大廳、更新清單，完成後再修改。', parent=self); return True
+        return False
     def _tree_dbl(self, e):
+        if self._locked(): return
         iid = self.tree.identify_row(e.y); col = self.tree.identify_column(e.x)
         if not iid: return
         if col == '#1': self.tree.set(iid, 'on', '' if self.tree.set(iid, 'on') else '✓')
@@ -145,6 +188,7 @@ class Gui(tk.Tk):
                 except Exception as e: self.q.put(('log', f'錯誤：{e!r}'))
         self._bg(wrapped)
     def running(self, idx):
+        if getattr(self, 'scanning', None) == idx: return True                  # lobby scan uses that emulator
         j = self.jobs.get(idx); return bool(j and j.get('proc') and j['proc'].poll() is None)
     def _busy(self):
         if self.running(self.emu()):
@@ -309,10 +353,37 @@ class Gui(tk.Tk):
         ttk.Button(bar, text='儲存', command=save).pack(side='right')
 
     def _del_slot(self):
+        if self._locked(): return
         sel = self.tree.selection()
-        if not sel or not messagebox.askyesno('刪除', f'刪除 {", ".join(sel)}？（縮圖檔保留）', parent=self): return
-        for i in sel: self.tree.delete(i)
+        if not sel or not messagebox.askyesno('刪除', f'刪除 {", ".join(sel)}？\n（之後「掃描大廳找新遊戲」也不會再把它加回來）', parent=self): return
+        a = self.app()
+        from core.catalog import ignore_tile
+        for i in sel:
+            p = os.path.join(a.dir, 'slots', i + '.png')
+            if os.path.exists(p): ignore_tile(a, imread(p), i)            # a later lobby scan will not add it back
+            self.tree.delete(i)
+        self._all_ids = [i for i in self._all_ids if i not in sel]
         self._save_tree()
+
+    def _scan_catalog(self):
+        """walk the whole lobby, add tiles that are not in the list yet (unticked, OCR-guessed names)"""
+        if self._busy() or self._locked(): return
+        a = self.app(); idx = self.emu()
+        if not a: return
+        if not messagebox.askokcancel('掃描大廳找新遊戲', f'在模擬器 {self.emu_name(idx)} 把 {a.p["name"]} 的大廳從頭滑到尾（約 5~8 分鐘），\n'
+                                      '清單裡還沒有的遊戲會自動加入（不勾選；名字是讀圖猜的，可雙擊「名稱」修改）。\n期間請不要操作這台模擬器。', parent=self): return
+        self.log(f'--- 掃描 {a.p["name"]} 大廳（模擬器 {self.emu_name(idx)}）---')
+        self.scanning = idx; self.btn_scan['state'] = 'disabled'
+        def work():
+            rc = -1
+            try:
+                p = subprocess.Popen([PY, '-u', '-m', 'core.catalog', '--app', a.id, '--emu', str(idx), '--add-new'], cwd=ROOT,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=NOWIN, env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+                for raw in p.stdout: self.q.put(('log', raw.decode('utf-8', 'replace')))
+                rc = p.wait()
+            except Exception as e: self.q.put(('log', f'掃描無法啟動：{e!r}'))
+            self.q.put(('reload', rc))
+        self._bg(work)
 
     def _test_find(self):
         if self._busy(): return
@@ -383,7 +454,7 @@ class Gui(tk.Tk):
 
     # ---------------- run / schedule / stop ----------------
     def _checked(self):
-        return [i for i in self.tree.get_children() if self.tree.set(i, 'on')]
+        return [i for i in self._all_ids if self.tree.exists(i) and self.tree.set(i, 'on')]   # incl. rows hidden by the search
     def _preflight(self, idx, minutes):
         """#10: enough RAM / disk before starting another emulator job? -> True to go on"""
         probs = []
@@ -527,6 +598,9 @@ class Gui(tk.Tk):
                 elif kind == 'crop': self._crop_dialog(item[1])
                 elif kind == 'tpl': self._tpl_dialog(item[1])
                 elif kind == 'emus': self._load_emus()
+                elif kind == 'reload':
+                    self.scanning = None; self.btn_scan['state'] = 'normal'; self._load_slots()
+                    self.log('=== 掃描完成，清單已更新 ===' if item[1] == 0 else f'=== 掃描失敗（rc={item[1]}），看上面的訊息 ===')
                 elif kind == 'run':
                     _, idx, v = item; j = self.jobs.get(idx, {}); dirty = True
                     self.log(f'[{self.emu_name(idx)}] {v.rstrip()}')

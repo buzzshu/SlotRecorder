@@ -12,3 +12,4 @@ __pycache__/
 *.pyc
 *.bak
 *.zip
+apps/*/catalog/

@@ -16,7 +16,7 @@ def pack(dest=None):
     with zipfile.ZipFile(dest, 'w', zipfile.ZIP_DEFLATED) as z:
         for dp, dns, fns in os.walk(ROOT):
             rel = os.path.relpath(dp, ROOT)
-            dns[:] = [x for x in dns if not (rel == '.' and x in SKIP_DIRS) and x != '__pycache__']
+            dns[:] = [x for x in dns if not (rel == '.' and x in SKIP_DIRS) and x != '__pycache__' and x != 'catalog']   # catalog = lobby screenshots of the last scan
             for f in fns:
                 if rel == '.' and (f in SKIP_FILES or f.startswith('STOP_') or f.endswith('.zip')): continue
                 if f.endswith(('.pyc', '.bak')): continue

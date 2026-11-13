@@ -57,8 +57,9 @@ class App:
         with open(self.slots_csv, encoding='utf-8-sig') as f: return list(csv.DictReader(f))
     def save_slots(self, rows):
         with open(self.slots_csv, 'w', newline='', encoding='utf-8') as f:
-            w = csv.DictWriter(f, fieldnames=['id', 'name', 'minutes', 'enabled']); w.writeheader()
-            for r in rows: w.writerow({k: r.get(k, '') for k in ['id', 'name', 'minutes', 'enabled']})
+            cols = ['id', 'name', 'minutes', 'enabled', 'hint']   # hint = lobby step where the catalog scan saw the tile
+            w = csv.DictWriter(f, fieldnames=cols); w.writeheader()
+            for r in rows: w.writerow({k: r.get(k, '') for k in cols})
 
     # ---------- state checks ----------
     def in_game(self, im): return self.t.find_lit(im, self.p['ingame_marker'], 0.8)[1] is not None
@@ -179,7 +180,19 @@ class App:
         if not self.to_lobby(): return None
         for _ in range(sc['rewind_times']): d.swipe(*sc['rewind_swipe']); time.sleep(0.3)
         time.sleep(2)
-        for _ in range(sc['max_steps']):
+        hint = next((r.get('hint') for r in self.slots() if r['id'] == slot_id), '') or ''
+        skip = max(0, int(hint) - 3) if str(hint).isdigit() else 0
+        if skip:                                             # far tile: fast-forward without looking (swipes are slow -> exact)
+            log(f'fast-forward {skip} steps to {slot_id}')
+            for _ in range(skip): check_stop(); d.swipe(*sc["step_swipe"]); time.sleep(0.5)
+            time.sleep(1)
+        step = 0
+        while step < sc['max_steps']:
+            step += 1
+            if skip and step > 12:                            # hint was wrong (lobby changed) -> search from the start
+                log('not near the hint -> full search'); skip = 0; step = 1
+                for _ in range(sc['rewind_times'] + 10): d.swipe(*sc['rewind_swipe']); time.sleep(0.3)
+                time.sleep(2)
             check_stop()
             if not self.to_lobby(stable=1): return None
             im = d.grab()

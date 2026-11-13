@@ -45,6 +45,10 @@
     [
       "btn_great",
       0.8
+    ],
+    [
+      "pick_card",
+      0.8
     ]
   ],
   "lobby_scan": {
@@ -63,12 +67,12 @@
       300,
       1500
     ],
-    "max_steps": 40,
+    "max_steps": 90,
     "region": [
       0,
-      140,
+      90,
       1280,
-      540
+      565
     ],
     "threshold": 0.6
   },
@@ -116,5 +120,36 @@
     "slot": "lvl_slot_huff",
     "check_from_level": 5,
     "max_minutes": 40
+  },
+  "catalog": {
+    "region": [
+      300,
+      1165,
+      90,
+      560
+    ],
+    "min_len": 90,
+    "classes": [
+      {
+        "w": [
+          160,
+          200
+        ],
+        "h": [
+          290,
+          400
+        ]
+      },
+      {
+        "w": [
+          95,
+          140
+        ],
+        "h": [
+          110,
+          190
+        ]
+      }
+    ]
   }
 }
