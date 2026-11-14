@@ -9,6 +9,7 @@ output: <video>_spins.tsv   one row per spin (time in video, bet, win, multiple,
         <video>_summary.json / _summary.html   RTP (+95% range), hit rate, win-size distribution, coins per hour, top wins
 """
 import argparse, html, json, math, os, re, subprocess, sys, time
+import cv2
 import numpy as np
 from .config import TOOLS, ROOT
 from .ocr import read_number
@@ -33,23 +34,34 @@ def boot_rtp(mult, n=2000, seed=1):
     return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
 
 # ---------------- reading the video ----------------
-def frames(path, fps):
-    p = subprocess.Popen([TOOLS['ffmpeg'] or 'ffmpeg', '-v', 'error', '-i', path, '-vf', f'fps={fps},scale={W}:{H}',
+def video_size(path):
+    try:
+        r = subprocess.run([TOOLS['ffprobe'] or 'ffprobe', '-v', 'error', '-select_streams', 'v', '-show_entries', 'stream=width,height',
+                            '-of', 'csv=p=0', path], capture_output=True, text=True, creationflags=_NOWIN)
+        w, h = map(int, r.stdout.strip().split(',')[:2]); return w, h
+    except (ValueError, OSError):
+        cap = cv2.VideoCapture(path); ok, fr = cap.read(); cap.release()      # ffprobe missing -> read one frame
+        if ok: return fr.shape[1], fr.shape[0]
+        raise SystemExit(f'cannot read video size: {path}')
+
+def frames(path, fps, size=None):
+    w_, h_ = size or (W, H)
+    p = subprocess.Popen([TOOLS['ffmpeg'] or 'ffmpeg', '-v', 'error', '-i', path, '-vf', f'fps={fps},scale={w_}:{h_}',
                           '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-'], stdout=subprocess.PIPE, creationflags=_NOWIN, bufsize=W * H * 3 * 2)
-    i, n = 0, W * H * 3
+    i, n = 0, w_ * h_ * 3
     try:
         while True:
             b = p.stdout.read(n)
             if len(b) < n: break
-            yield i / fps, np.frombuffer(b, np.uint8).reshape(H, W, 3); i += 1
+            yield i / fps, np.frombuffer(b, np.uint8).reshape(h_, w_, 3); i += 1
     finally:
         p.stdout.close(); p.kill()
 
-def read_series(path, boxes, fps=4, progress=None):
+def read_series(path, boxes, fps=4, progress=None, size=None):
     """-> list of (t, balance|None), list of (t, bet) ; OCR only when the meter pixels changed"""
     bx, tx = boxes['balance'], boxes.get('bet')
     bal, bets = [], []; last_crop = last_val = None; last_bet_t = -99
-    for t, im in frames(path, fps):
+    for t, im in frames(path, fps, size):
         c = im[bx[1]:bx[3], bx[0]:bx[2]]
         if last_crop is not None and np.abs(c.astype(np.int16) - last_crop).mean() < 1.0: v = last_val
         else: v = read_number(c, 0.75); last_crop = c.astype(np.int16); last_val = v
@@ -142,15 +154,19 @@ def analyze(mp4, app_id=None, fps=4, say=print):
         with open(base + '_stats.json', encoding='utf-8') as f: stats = json.load(f)
     app_id = app_id or stats.get('app') or os.path.basename(os.path.dirname(os.path.abspath(mp4)))
     prof = json.load(open(os.path.join(ROOT, 'apps', app_id, 'profile.json'), encoding='utf-8'))
-    boxes = prof.get('meters')
-    if not boxes or 'balance' not in boxes: raise SystemExit(f'{app_id}: profile has no meters.balance box')
+    size = video_size(mp4)                                   # landscape slots are recorded as 1280x720 videos
+    boxes = (prof.get('landscape') or {}).get('meters') if size[0] > size[1] else prof.get('meters')
+    if not boxes or 'balance' not in boxes: raise SystemExit(f'{app_id}: profile has no meters.balance box for a {size[0]}x{size[1]} video')
     t_start = time.time(); say(f'reading balance meter: {os.path.basename(mp4)}')
     cache = base + '_meter.json'
+    c = None
     if os.path.exists(cache) and os.path.getmtime(cache) > os.path.getmtime(mp4):
         with open(cache) as f: c = json.load(f)
+        if c.get('boxes') != boxes or c.get('fps') != fps: c = None            # profile boxes / orientation changed
+    if c:
         series, bet_reads = [tuple(x) for x in c['series']], [tuple(x) for x in c['bets']]
     else:
-        series, bet_reads = read_series(mp4, boxes, fps, progress=lambda t: say(f'  {hms(t)} read'))
+        series, bet_reads = read_series(mp4, boxes, fps, progress=lambda t: say(f'  {hms(t)} read'), size=size)
         with open(cache, 'w') as f: json.dump({'fps': fps, 'boxes': boxes, 'series': series, 'bets': bet_reads}, f)
     read_ok = sum(1 for _, v in series if v is not None) / max(1, len(series))
     vals = stable_values(series)

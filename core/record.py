@@ -105,10 +105,13 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
               stalls=0, backs=0, escalations=[], errors=0, resets=0, bet=None, bet_changes=0, timeline=[], taps=[])
     try:
         app.guard_focus()
-        if not app.settle_in_game():
+        # always enter through the lobby: a slot that is already open may be a DIFFERENT game (left by an earlier job)
+        if True:
             if not app.enter_slot(slot_id):
-                app.restart()
-                if not app.enter_slot(slot_id): log('cannot enter slot'); return 2
+                if p.get('leveling') and app.level_until_slot(slot_id) and app.enter_slot(slot_id): pass
+                else:
+                    app.restart()
+                    if not app.enter_slot(slot_id): log('cannot enter slot'); return 2
         st['bet'] = app.min_bet()
     except StopRequested:
         log('STOP requested before recording started'); return 2
@@ -159,8 +162,8 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
     last_chk = last_snap = last_prog = last_meter = 0; last_betchk = time.time(); off_since = None; back_streak = 0
     prev_sig = None; same_since = None; popup_times = []; last_reset_t = None; centre_taps = 0
     span = {}                                                  # current off-game span (video time + what was done)
-    rep = {'x': (None, 0), 'spin': 0, 'ocr': (None, 0)}
-    def reset_rep(): rep.update(x=(None, 0), spin=0, ocr=(None, 0))
+    rep = {'x': (None, 0), 'spin': 0, 'ocr': (None, 0), 'skip': set()}
+    def reset_rep(): rep.update(x=(None, 0), spin=0, ocr=(None, 0), skip=set())
     def close_span():
         nonlocal span
         if span.get('vt0') is not None:
@@ -242,6 +245,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                     same_since = None if changed(prev_sig, sig) else (same_since or now)
                     prev_sig = sig
                     frozen = 0 if same_since is None else now - same_since
+                    if ig: app.lay(im)                                   # portrait or landscape slot -> its button positions
                     if ig and frozen < 30:
                         if off_since is not None: close_span()
                         off_since = None; back_streak = 0; centre_taps = 0; reset_rep(); status('game')
@@ -271,6 +275,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                                 st['bet'] = app.min_bet() or st['bet']; off_since = None; reset_rep(); close_span()
                             else: esc('re-enter failed', im)
                         else:
+                            if rep['ocr'][1] >= 3: rep['skip'].add(rep['ocr'][0])   # tapped 3x, no effect -> skip until back in game
                             s, x = app.find_x(im)
                             if not x: s, x = app.find_x(im, full=True)
                             lx, nx = rep['x']
@@ -284,8 +289,8 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                                 d.tap(*tb[1]); st['popups'] += 1; popup_times.append(now); log('tap', tb[0], tb[1]); snap('btn', im)
                                 tapev('btn', tb[0])
                             elif rep['spin'] < 3 and app.spin_visible(im):
-                                d.tap(*p['spin_xy']); rep['spin'] += 1; log('tap lit SPIN (overlay/tutorial)')
-                            elif (ob := safe_button(im))[0] and not (ob[1] == rep['ocr'][0] and rep['ocr'][1] >= 3):
+                                d.tap(*app.lay()['spin_xy']); rep['spin'] += 1; log('tap lit SPIN (overlay/tutorial)')
+                            elif (ob := safe_button(im, rep['skip']))[0] and not (ob[1] == rep['ocr'][0] and rep['ocr'][1] >= 3):
                                 rep['ocr'] = (ob[1], rep['ocr'][1] + 1 if ob[1] == rep['ocr'][0] else 1)
                                 d.tap(*ob[0]); st['popups'] += 1; popup_times.append(now); log('OCR tap', ob[1], ob[0]); snap('ocr', im)
                                 tapev('ocr', ob[1])
@@ -309,7 +314,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                     st['errors'] += 1; log('check step failed:', repr(e))
                     if st['errors'] > 100: raise
             if off_since is None:
-                d.tap(*p['spin_xy']); st['spins'] += 1
+                d.tap(*app.lay()['spin_xy']); st['spins'] += 1
             time.sleep(interval)
     except StopRequested:
         log('STOP requested'); st['stopped'] = True

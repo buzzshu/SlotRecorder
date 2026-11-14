@@ -135,18 +135,18 @@ def walk(app, max_steps=150, say=log):
     """from the far left to the end of the lobby, one screenshot per step"""
     sc = app.p['lobby_scan']; cfg = app.p['catalog']; x0, x1, y0, y1 = cfg['region']
     if not app.to_lobby(): raise RuntimeError('cannot reach the lobby')
-    for _ in range(sc['rewind_times'] + 6): d.swipe(*sc['rewind_swipe']); time.sleep(0.3)
-    time.sleep(2.5); frames = []; prev = None; same = 0
+    app.rewind(); time.sleep(1); frames = []; prev = None; same = 0
     for i in range(max_steps):
         d.check_stop()
         im = d.grab()
         if not app.is_lobby(im):
             act = app.dismiss_once(im, allow_back=False); say('popup', act); time.sleep(3); im = d.grab()
         frames.append((f'{i:03d}', im))
-        sig = signature(im[y0:y1, x0:x1])                        # tiles only: side ads keep animating
-        same = same + 1 if (prev is not None and not changed(prev, sig, 3)) else 0
+        yl = y0 + (y1 - y0) * 2 // 5                              # lower tile half: side ads / jackpot meters keep animating
+        sig = signature(im[yl:y1, x0:x1])
+        same = same + 1 if (app.is_lobby(im) and prev is not None and not changed(prev, sig, 1.5)) else 0
         prev = sig
-        if same >= 2: say(f'end of lobby after {i} steps'); break
+        if same >= 3: say(f'end of lobby after {i} steps'); break
         d.swipe(*sc['step_swipe']); time.sleep(2.5)
     return frames
 
@@ -223,12 +223,13 @@ def refresh_hints(app, say=log):
     rows = app.slots(); found = 0
     for r in rows:
         hit = next((i for i, im in frames if app.t.find(im, r['id'], app.p['lobby_scan']['threshold'], region=region)[1]), None)
-        if hit is not None: r['hint'] = str(hit); found += 1          # not seen this time -> keep the old hint
+        r['hint'] = str(hit) if hit is not None else ''; found += hit is not None   # not seen -> no hint (= full search)
     app.save_slots(rows); say(f'catalog: lobby position updated for {found}/{len(rows)} slots (not seen this time: {len(rows) - found})')
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(); ap.add_argument('--app', required=True); ap.add_argument('--emu', type=int)
     ap.add_argument('--add-new', action='store_true', help='add tiles not in slots.csv yet')
+    ap.add_argument('--hints', action='store_true', help='only re-record the lobby position of listed slots')
     a = ap.parse_args()
     if a.emu is not None: d.use(a.emu)
     from .app import App
@@ -237,3 +238,4 @@ if __name__ == '__main__':
     if not d.focus().endswith(app.p['activity']): app.restart()
     scan(app)
     if a.add_new: add_new(app)
+    elif a.hints: refresh_hints(app)

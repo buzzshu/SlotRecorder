@@ -4,8 +4,8 @@ import re
 
 SAFE = ['TAP TO CONTINUE', 'SKIP ALL', 'CONTINUE', 'FINISH', 'CLAIM ALL', 'CLAIM', 'COLLECT ALL', 'GREAT', 'OK', 'OKAY', 'GOT IT',
         'DONE', 'NEXT', 'MAYBE LATER', 'LATER', 'NO THANKS', 'NOT NOW', 'CLOSE', 'SKIP', 'COOL', 'AWESOME',
-        "LET'S GO", 'LETS GO', 'GO GO GO', 'START', 'COLLECT', 'UPGRADE']   # priority order: earlier wins
-REFUSE = {'NO THANKS', 'MAYBE LATER', 'NOT NOW', 'LATER', 'CLOSE'}   # only these on a page that shows DANGER text
+        "LET'S GO", 'LETS GO', 'GO GO GO', 'END TUTORIAL', 'SKIP TUTORIAL', 'START', 'COLLECT', 'UPGRADE']   # priority order: earlier wins
+REFUSE = {'NO THANKS', 'MAYBE LATER', 'NOT NOW', 'LATER', 'CLOSE', 'END TUTORIAL', 'SKIP TUTORIAL'}   # only these on a page that shows DANGER text
 # "$4.99" / "$5" = price -> danger;  "$500,000M" jackpot meter and "UNLOCK AT LEVEL 30" banner are not (88F shows them in every slot)
 DANGER = re.compile(r'\$\s?\d{1,4}(?:[.,]\d\d)?\b(?![.,]?\d|[KMBT])|\$\s*$|USD|BUY|UNLOCK(?!\s*AT\s*(?:LEVEL|LVL))|PURCHASE|SHOP|WATCH|PAY|PRICE|SUBSCRIBE|TRIAL|OFFER|VIP|INSTALL|QUIT|EXIT|'
                     r'LOG ?OUT|SIGN ?OUT|DELETE|\d+[.,]\d\d\b|\bS\d')
@@ -51,8 +51,9 @@ def available():
 
 def _key(t): return re.sub(r'[^A-Z]', '', t.upper())
 
-def _pick(res):
-    """choose the best safe button among OCR results (coords in the image that was read)"""
+def _pick(res, exclude=()):
+    """choose the best safe button among OCR results (coords in the image that was read).
+    exclude: labels already tapped without effect (e.g. a button behind a dialog) -> try the next one"""
     res = [(b, t, p) for b, t, p in res if p > 0.4]
     def centre(b): return (int(sum(q[0] for q in b) / 4), int(sum(q[1] for q in b) / 4))
     danger = [centre(b) for b, t, _ in res if DANGER.search(t.upper())]
@@ -60,7 +61,7 @@ def _pick(res):
     for b, t, p in res:
         if re.search(r'\d', t): continue                  # misread prices ("COLLECT 4.99") never qualify
         label = _SAFE_KEY.get(_key(t))
-        if not label: continue
+        if not label or label in exclude: continue
         if danger and label not in REFUSE: continue       # purchase / ad / exit page: only explicit "no" buttons
         c = centre(b)
         if any(abs(c[0] - dx) < 120 and abs(c[1] - dy) < 50 for dx, dy in danger): continue   # text sits on a paid button
@@ -70,16 +71,16 @@ def _pick(res):
     return c, label, bool(danger)
 
 LAST_DANGER = False
-def safe_button(im):
+def safe_button(im, exclude=()):
     """-> ((x, y), label) of the best safe button, or (None, None).
     Portrait screens are also read rotated 90 deg both ways: some games show landscape popups on a portrait screen."""
     global LAST_DANGER
-    c, label, danger = _pick(_read_safe(im)); LAST_DANGER = bool(danger and not c)
+    c, label, danger = _pick(_read_safe(im), exclude); LAST_DANGER = bool(danger and not c)
     if c or danger or im.shape[0] <= im.shape[1]: return c, label
     import cv2
     H, W = im.shape[:2]
     for rot in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
-        c, label, danger = _pick(_read_safe(cv2.rotate(im, rot)))
+        c, label, danger = _pick(_read_safe(cv2.rotate(im, rot)), exclude)
         if danger: LAST_DANGER = not c
         if danger and not c: return None, None
         if c:

@@ -1,5 +1,5 @@
 """Per-app game logic driven by apps/<id>/profile.json: focus guard, popup dismiss, lobby navigation, slot entry, reset."""
-import csv, json, os, subprocess, time
+import csv, json, os, re, subprocess, time
 import cv2
 from . import device as d
 from .config import ROOT, CFG, TOOLS
@@ -62,7 +62,10 @@ class App:
             for r in rows: w.writerow({k: r.get(k, '') for k in cols})
 
     # ---------- state checks ----------
-    def in_game(self, im): return self.t.find_lit(im, self.p['ingame_marker'], 0.8)[1] is not None
+    def in_game(self, im):
+        if self.t.find_lit(im, self.p['ingame_marker'], 0.8)[1] is not None: return True
+        lm = (self.p.get('landscape') or {}).get('ingame_marker')            # landscape slots may draw it differently
+        return bool(lm) and im.shape[1] > im.shape[0] and self.t.find_lit(im, lm, 0.8)[1] is not None
     def is_lobby(self, im): return self.t.find_lit(im, self.p['lobby_marker'])[1] is not None
     def low_coins(self, im): return self.p.get('low_coins') and self.t.find(im, self.p['low_coins'], 0.85)[1] is not None
     def find_x(self, im, full=False):
@@ -78,12 +81,24 @@ class App:
                 return rs, ((W - 1 - y, x) if rot == cv2.ROTATE_90_COUNTERCLOCKWISE else (y, H - 1 - x))
         return s, None
 
+    # ---------- layout: most slots are portrait, some are landscape (profile 'landscape' = their positions) ----------
+    LAYOUT_KEYS = ('spin_xy', 'bet_minus_xy', 'bet_plus_xy', 'exit_slot_xy', 'meters')
+    def lay(self, im=None):
+        """button / meter positions for the slot on screen. Pass the current in-game screenshot to (re)detect the
+        orientation; without it the last detected one is used (e.g. the spin taps between two checks)."""
+        if im is not None: self._land = bool(self.p.get('landscape')) and im.shape[1] > im.shape[0]
+        base = {k: self.p.get(k) for k in self.LAYOUT_KEYS}
+        if getattr(self, '_land', False): base.update(self.p['landscape'])
+        return base
+
     @property
     def portrait_game(self):
         sx, sy = self.p['spin_xy']; return sy > self.p['screen'][1]   # spin y beyond landscape height -> portrait game
 
     def spin_visible(self, im):
-        return self.t.find_lit(im, self.p['spin_btn'], 0.8)[1] is not None and (im.shape[0] > im.shape[1]) == self.portrait_game
+        if self.t.find_lit(im, self.p['spin_btn'], 0.8)[1] is None: return False
+        if (im.shape[0] > im.shape[1]) == self.portrait_game: return True
+        return bool(self.p.get('landscape')) and self.in_game(im)          # landscape slot (lobby is landscape too)
 
     # ---------- actions ----------
     def deny_permissions(self):
@@ -122,7 +137,7 @@ class App:
             if c: return name, c
         return None
 
-    def dismiss_once(self, im, allow_back=True):
+    def dismiss_once(self, im, allow_back=True, exclude=()):
         for name, thr in self.p.get('dismiss_templates', []):
             s, c = self.t.find(im, name, thr)
             if c: d.tap(*c); return f'tap {name}'
@@ -130,7 +145,7 @@ class App:
         if not c: s, c = self.find_x(im, full=True)
         if c: d.tap(*c); return f'tap X {c} {s:.2f}'
         from .ocr import safe_button
-        c, label = safe_button(im)
+        c, label = safe_button(im, exclude)
         if c: d.tap(*c); return f'OCR tap "{label}" {c}'
         if not allow_back: return None
         d.back(); return 'BACK'
@@ -145,10 +160,11 @@ class App:
             log('start: popup ->', act); time.sleep(3)
         return self.in_game(d.grab())
 
-    def to_lobby(self, max_steps=60, stable=2, max_s=600):
+    def to_lobby(self, max_steps=60, stable=2, max_s=600, restart_ok=True):
         """dismiss popups until the clean lobby shows. Waits instead of BACK while the screen is still changing
         (asset download / loading). The same action 4x in a row -> BACK instead."""
-        ok = 0; t0 = time.time(); prev = None; waits = 0; last_act = None; same_act = 0
+        ok = 0; t0 = time.time(); prev = None; waits = 0; last_act = None; same_act = 0; exit_tries = 0; skip_labels = set()
+        last_sig = None; restarted = False
         for _ in range(max_steps):
             if time.time() - t0 > max_s: break
             check_stop()
@@ -159,27 +175,52 @@ class App:
                 if ok >= stable: return True
                 time.sleep(4); continue
             ok = 0
-            if self.p.get('exit_slot_xy') and self.in_game(im):    # inside a slot: BACK does nothing in some games
-                d.tap(*self.p['exit_slot_xy']); log('in a slot -> exit button'); time.sleep(6); continue
+            ex = self.lay(im).get('exit_slot_xy') if self.in_game(im) else None
+            if ex and exit_tries < 3:                               # inside a slot: BACK does nothing in some games
+                exit_tries += 1; d.tap(*ex); log('in a slot -> exit button'); time.sleep(6); continue
+            if ex: log('exit button did not leave the slot 3x -> other ways')
             sig = cv2.resize(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY), (64, 36)).astype('int16')
             moving = prev is not None and prev.shape == sig.shape and abs(sig - prev).mean() > 3
             prev = sig
             imwrite(os.path.join(self.shots, f'pop_{time.strftime("%H%M%S")}.png'), im)
-            act = self.dismiss_once(im, allow_back=False) if same_act < 4 else None
+            act = self.dismiss_once(im, allow_back=False, exclude=skip_labels) if same_act < 4 else None
             if act is None:
                 if moving and waits < 6:
                     waits += 1; log('screen changing (loading?) -> wait'); time.sleep(5); continue
                 d.back(); act = 'BACK'
             waits = 0
-            same_act = same_act + 1 if act == last_act else 0; last_act = act
+            key = re.sub(r'\d+', lambda m: str(int(m.group()) // 25), re.sub(r'\s\d+\.\d+$', '', act))   # tap spot in 25-px cells, no score
+            unchanged = last_sig is not None and abs(sig - last_sig).mean() <= 3
+            same_act = same_act + 1 if (key == last_act and unchanged) else 0; last_act = key; last_sig = sig
+            m = re.match(r'OCR tap "(.+?)"', act)
+            if m and same_act >= 2:                                   # text button tapped 3x without effect -> try others
+                skip_labels.add(m.group(1)); log(f'"{m.group(1)}" has no effect -> try other buttons'); same_act = 0
             log('popup:', act); time.sleep(3)
+            if key == 'BACK' and same_act >= 9 and restart_ok and not restarted:   # BACK does nothing here -> start the app fresh (once)
+                log('BACK x10 on an unchanged screen -> restart app'); self.restart(); restarted = True
+                same_act = 0; skip_labels.clear(); last_act = last_sig = prev = None; waits = 0
         return False
+
+    def rewind(self, max_flings=15):
+        """fling the lobby back to its far-left start: repeat until the tiles stop moving (a fixed count is not
+        enough when we come back from a slot at the far right end of a long lobby)"""
+        sc = self.p['lobby_scan']; x0, y0, x1, y1 = sc['region']; prev = None; still = 0
+        if self.p.get('catalog'): x0, x1, y0, y1 = self.p['catalog']['region']   # tiles only: side ads keep animating
+        y0 = y0 + (y1 - y0) * 2 // 5                                  # lower tile half: jackpot meters on top keep ticking
+        for i in range(max_flings):
+            for _ in range(4): d.swipe(*sc['rewind_swipe']); time.sleep(0.25)
+            time.sleep(1.2); im = d.grab()
+            if not self.is_lobby(im): prev = None; still = 0; continue          # a popup covers the lobby
+            sig = signature(im[y0:y1, x0:x1])
+            still = still + 1 if (prev is not None and not changed(prev, sig, 8)) else 0   # a fling moves ~40; banners ~3-6
+            prev = sig
+            if still >= 1: return True
+        log('rewind: lobby still moving after', max_flings * 4, 'flings'); return False
 
     def find_slot(self, slot_id):
         sc = self.p['lobby_scan']
         if not self.to_lobby(): return None
-        for _ in range(sc['rewind_times']): d.swipe(*sc['rewind_swipe']); time.sleep(0.3)
-        time.sleep(2)
+        self.rewind()
         hint = next((r.get('hint') for r in self.slots() if r['id'] == slot_id), '') or ''
         skip = max(0, int(hint) - 3) if str(hint).isdigit() else 0
         if skip:                                             # far tile: fast-forward without looking (swipes are slow -> exact)
@@ -191,8 +232,7 @@ class App:
             step += 1
             if skip and step > 12:                            # hint was wrong (lobby changed) -> search from the start
                 log('not near the hint -> full search'); skip = 0; step = 1
-                for _ in range(sc['rewind_times'] + 10): d.swipe(*sc['rewind_swipe']); time.sleep(0.3)
-                time.sleep(2)
+                self.rewind()
             check_stop()
             if not self.to_lobby(stable=1): return None
             im = d.grab()
@@ -218,7 +258,7 @@ class App:
                 if not self.verify_slot(slot_id, im): log('WRONG SLOT'); return False
                 log('in game'); return True
             if self.spin_visible(im) and spin_taps < 5:
-                d.tap(*self.p['spin_xy']); spin_taps += 1; log('tap lit SPIN (tutorial)'); continue
+                d.tap(*self.lay(im)['spin_xy']); spin_taps += 1; log('tap lit SPIN (tutorial)'); continue
             if self.p.get('play_btn'):
                 s, pb = self.t.find(im, self.p['play_btn'], 0.75)
                 if pb: d.tap(*pb); log('tap PLAY'); continue
@@ -234,8 +274,9 @@ class App:
 
     # ---------- meters (balance / bet read by OCR; boxes in profile "meters") ----------
     def read_meter(self, im, name):
-        box = (self.p.get('meters') or {}).get(name)
-        if not box or im is None: return None
+        if im is None: return None
+        box = (self.lay(im).get('meters') or {}).get(name)
+        if not box: return None
         from .ocr import read_box
         return read_box(im, box)
 
@@ -243,8 +284,9 @@ class App:
         """player level from the 'LVL n' label (profile meters.level for the in-slot portrait screen,
         meters.level_lobby for the landscape lobby). small text -> upscaled 3x + full OCR. -> int or None"""
         import re
-        key = 'level' if im.shape[0] > im.shape[1] else 'level_lobby'
-        box = (self.p.get('meters') or {}).get(key)
+        if im.shape[0] > im.shape[1]: box = (self.p.get('meters') or {}).get('level')
+        elif self.p.get('landscape') and self.in_game(im): box = (self.p['landscape'].get('meters') or {}).get('level')
+        else: box = (self.p.get('meters') or {}).get('level_lobby')
         if not box: return None
         from . import ocr
         x0, y0, x1, y1 = box
@@ -264,16 +306,18 @@ class App:
         """tap bet-minus N times, then confirm with OCR that the bet no longer drops (= minimum).
         Some games wrap from min to max on one more minus -> detected (bet went UP) and undone with bet-plus.
         returns the bet read from screen, or None (no meter box / unreadable)."""
-        if not self.in_game(d.grab()): return None
-        for _ in range(self.p.get('bet_minus_taps', 12)): d.tap(*self.p['bet_minus_xy']); time.sleep(0.4)
-        if not (self.p.get('meters') or {}).get('bet'): return None
+        im = d.grab()
+        if not self.in_game(im): return None
+        L = self.lay(im)
+        for _ in range(self.p.get('bet_minus_taps', 12)): d.tap(*L['bet_minus_xy']); time.sleep(0.4)
+        if not (L.get('meters') or {}).get('bet'): return None
         time.sleep(1); a = self._read_bet()
         for _ in range(25):
             if a is None: log('bet: unreadable'); return None
-            d.tap(*self.p['bet_minus_xy']); time.sleep(1.2); b = self._read_bet()
+            d.tap(*L['bet_minus_xy']); time.sleep(1.2); b = self._read_bet()
             if b == a: log(f'bet confirmed minimum: {a:,}'); return a
             if b is not None and b > a:                 # wrapped around to max bet
-                if self.p.get('bet_plus_xy'): d.tap(*self.p['bet_plus_xy']); time.sleep(1.2)
+                if L.get('bet_plus_xy'): d.tap(*L['bet_plus_xy']); time.sleep(1.2)
                 c = self._read_bet(); log(f'bet wrapped ({b:,}) -> back to {c}'); return c
             a = b
         log('bet: kept dropping after 25 extra taps'); return a
@@ -309,7 +353,7 @@ class App:
                     if self.find_slot(slot_id): log(f'leveling: {slot_id} unlocked at level {level}'); return True
                     if not self.enter_slot(lv['slot']): return False
                     continue
-            for _ in range(3): d.tap(*self.p['spin_xy']); time.sleep(interval)
+            for _ in range(3): d.tap(*self.lay(im)['spin_xy']); time.sleep(interval)
         log('leveling: gave up after', lv.get('max_minutes', 40), 'min'); return False
 
     def reset_new_instance(self):
@@ -332,7 +376,7 @@ class App:
         if sw:
             with open(sw, 'w') as f: f.write(str(new))
         self.restart(wait=60)
-        return self.to_lobby(max_steps=80)
+        return self.to_lobby(max_steps=80, restart_ok=False)      # new account: long asset downloads look 'stuck'
 
     def reset_account(self, level=1):
         """level 1: pm clear (new guest account). level 2: new androidid/imei + emulator reboot, then level 1.
@@ -357,4 +401,4 @@ class App:
         log('pm clear', self.p['package'])
         d.adb('shell', 'pm', 'clear', self.p['package'])
         self.restart(wait=60)
-        return self.to_lobby(max_steps=80)
+        return self.to_lobby(max_steps=80, restart_ok=False)

@@ -134,5 +134,38 @@
       0.07,
       0.04
     ]
+  },
+  "landscape": {
+    "ingame_marker": "ingame_totalbet_land",
+    "spin_xy": [
+      1150,
+      670
+    ],
+    "bet_minus_xy": [
+      205,
+      680
+    ],
+    "bet_plus_xy": [
+      418,
+      680
+    ],
+    "exit_slot_xy": [
+      45,
+      680
+    ],
+    "meters": {
+      "balance": [
+        290,
+        20,
+        445,
+        60
+      ],
+      "bet": [
+        250,
+        664,
+        372,
+        702
+      ]
+    }
   }
 }
