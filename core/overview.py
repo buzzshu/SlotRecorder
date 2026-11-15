@@ -48,7 +48,12 @@ def collect(app_id):
         key = st.get('slot') or by_name.get(_norm(fname)) or fname
         m = re.match(r'(\d{4})(\d\d)(\d\d)_(\d\d)(\d\d)', os.path.basename(base))
         when = f'{m[1]}-{m[2]}-{m[3]} {m[4]}:{m[5]}' if m else ''
-        g = games.setdefault(key, {'id': key, 'name': names.get(key) or st.get('name') or fname, 'videos': [], 'spins': []})
+        g = games.setdefault(key, {'id': key, 'name': names.get(key) or st.get('name') or fname, 'videos': [], 'spins': [],
+                                   'feat_x': [], 'feat_known': False})
+        fs = s.get('features')
+        if fs is not None:
+            g['feat_known'] = True; g['feat_x'] += [x['x'] for x in fs.get('list') or []]
+            g['feat_spins'] = g.get('feat_spins', 0) + s.get('spins', 0)
         sp = load_spins(base)
         g['videos'].append({'video': os.path.basename(base) + '.mp4', 'when': when, 'play_hours': s.get('play_hours', 0),
                             'video_s': st.get('video_s') or _secs(s.get('video_length')), 'spins': len(sp), 'rtp': s.get('rtp'), 'bet': s.get('bet'),
@@ -65,6 +70,10 @@ def collect(app_id):
             g.update({k: core[k] for k in ('rtp', 'rtp_95', 'hit_rate', 'hit_every_n', 'total_bet', 'total_win')})
         g['n'] = n
         g['need'] = max(0, TARGET() - n)
+        k = len(g['feat_x'])
+        g['feat_n'] = k if g['feat_known'] else None
+        g['feat_every'] = round(g.get('feat_spins', n) / k, 1) if k else None
+        g['feat_avg_x'] = round(sum(g['feat_x']) / k, 1) if k else None
         hours = g['video_hours'] if g['video_hours'] > 0 else g['play_hours']     # incl. popups / lobby: real recording time
         sph = n / hours if hours > 0 and n else None
         g['spins_per_hour'] = round(sph) if sph else None
@@ -105,6 +114,11 @@ class _Lock:
         except OSError: pass
 
 # ---------------- HTML ----------------
+def _feat_cell(g):
+    if g.get('feat_n') is None: return '—'
+    if not g['feat_n']: return '0 次'
+    return f"每 {g['feat_every']} 局 / 平均 {g['feat_avg_x']} 倍"
+
 def render(all_games, target):
     e = html.escape; pct = lambda x: '—' if x is None else f'{x:.1%}'
     secs = []
@@ -117,23 +131,24 @@ def render(all_games, target):
             rows.append(f"<tr class='{'ok' if not g['need'] else 'low'}'><td>{e(g['name'])}</td><td>{len(g['videos'])}</td>"
                         f"<td>{g['video_hours']:.2f}</td><td>{g['play_hours']:.2f}</td><td>{g['n']:,}</td><td class=b>{pct(g.get('rtp'))}</td>"
                         f"<td>{pct(lo)} ~ {pct(hi)}</td><td>{'每 %s 把' % g['hit_every_n'] if g.get('hit_every_n') else '—'}</td>"
-                        f"<td>{e(g['last'])}</td><td>{need}</td><td><a href='{e(link)}'>最新報告</a></td></tr>")
+                        f"<td>{_feat_cell(g)}</td><td>{e(g['last'])}</td><td>{need}</td><td><a href='{e(link)}'>最新報告</a></td></tr>")
         tot_h = sum(g['play_hours'] for g in games.values()); tot_n = sum(g['n'] for g in games.values())
         done = sum(1 for g in games.values() if not g['need'])
         secs.append(f"""<h2>{e(app_name)}</h2>
 <p>已錄 {len(games)} 款 / 清單共 {n_slots} 款；達到 {target:,} 局的 {done} 款；遊戲中合計 {tot_h:.1f} 小時、{tot_n:,} 局。
 Excel：<a href='{e(app_id)}/{e(app_id)}_統計.xlsx'>{e(app_id)}_統計.xlsx</a></p>
-<table><tr><th>遊戲</th><th>影片</th><th>影片時數</th><th>遊戲中時數</th><th>局數</th><th>RTP</th><th>95% 範圍</th><th>中獎率</th><th>最近錄影</th><th>樣本</th><th>報告</th></tr>
-{''.join(rows) or '<tr><td colspan=11>還沒有分析過的影片</td></tr>'}</table>""")
+<table><tr><th>遊戲</th><th>影片</th><th>影片時數</th><th>遊戲中時數</th><th>局數</th><th>RTP</th><th>95% 範圍</th><th>中獎率</th><th>特色遊戲</th><th>最近錄影</th><th>樣本</th><th>報告</th></tr>
+{''.join(rows) or '<tr><td colspan=12>還沒有分析過的影片</td></tr>'}</table>""")
     return f"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><title>錄影總覽</title>
 <style>@page{{size:A4 landscape;margin:10mm}}body{{font-family:"Microsoft JhengHei",sans-serif;margin:24px;color:#222;font-size:13px}}
 table{{border-collapse:collapse;margin:8px 0 24px;page-break-inside:avoid}}td,th{{border:1px solid #ccc;padding:4px 8px;text-align:right;white-space:nowrap}}
-th{{background:#f3f3f3}}td:first-child,th:first-child{{text-align:left}}.b{{font-weight:bold}}tr.low td:nth-child(10){{color:#b45309}}
-tr.ok td:nth-child(10){{color:#15803d}}</style>
+th{{background:#f3f3f3}}td:first-child,th:first-child{{text-align:left}}.b{{font-weight:bold}}tr.low td:nth-child(11){{color:#b45309}}
+tr.ok td:nth-child(11){{color:#15803d}}</style>
 <h1>錄影總覽</h1><p>更新時間 {time.strftime('%Y-%m-%d %H:%M')}｜每款目標 {target:,} 局（局數少於目標時 RTP 範圍很寬，僅供參考）。
 樣本不足的排在前面；在 SlotRecorder 按「勾選樣本不足」可以一鍵勾選並設好補錄分鐘數。</p>
 {''.join(secs)}
-<p style="color:#888">RTP＝總贏分 ÷ 總押注（同一款的所有影片合計）；95% 範圍以每把重抽樣估計。</p></html>"""
+<p style="color:#888">RTP＝總贏分 ÷ 總押注（同一款的所有影片合計）；95% 範圍以每把重抽樣估計。
+特色遊戲＝自動偵測（某把贏分後超過 25 秒沒扣押注、畫面仍在遊戲中），「—」＝影片是舊版分析、還沒偵測過（按 📊 重新分析即可）。</p></html>"""
 
 # ---------------- Excel (live formulas) ----------------
 def _ensure_openpyxl(say):
@@ -156,10 +171,11 @@ def write_excel(app_id, app_name, games, path, say=print):
     from openpyxl.styles import Font, PatternFill
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = '總表'
     head = ['遊戲', '局數', '總押注', '總贏分', 'RTP', '中獎率', '每 N 把中一次', '遊戲中時數', '每小時局數', '影片數', '最近錄影',
-            '目標局數', '還差局數', 'RTP 95% 下限（程式算）', 'RTP 95% 上限（程式算）', '工作表']
+            '目標局數', '還差局數', 'RTP 95% 下限（程式算）', 'RTP 95% 上限（程式算）', '工作表',
+            '特色次數（程式偵測）', '每 N 局觸發一次', '特色平均倍數（押注）']
     ws.append(head); bold = Font(bold=True)
     for c in ws[1]: c.font = bold; c.fill = PatternFill('solid', fgColor='F3F3F3')
-    ws['R1'] = '目標局數'; ws['S1'] = TARGET(); ws['R1'].font = bold                     # one cell -> change it, column M follows
+    ws['U1'] = '目標局數'; ws['V1'] = TARGET(); ws['U1'].font = bold                     # one cell -> change it, column M follows
     used = {'總表'}
     for r, g in enumerate(sorted(games.values(), key=lambda g: g['name']), start=2):
         sn = _sheet_name(g['name'], used); sh = wb.create_sheet(sn); q = f"'{sn}'"
@@ -185,10 +201,11 @@ def write_excel(app_id, app_name, games, path, say=print):
         lo, hi = g.get('rtp_95') or (None, None)
         ws.append([g['name'], f'=COUNT({q}!C:C)', f'=SUM({q}!C:C)', f'=SUM({q}!D:D)', f'=IF(C{r}>0,D{r}/C{r},0)',
                    f'=IF(B{r}>0,COUNTIF({q}!D:D,">0")/B{r},0)', f'=IF(F{r}>0,1/F{r},"—")', round(g['play_hours'], 3),
-                   f'=IF(H{r}>0,B{r}/H{r},"—")', len(g['videos']), g['last'], '=$S$1', f'=MAX(0,L{r}-B{r})', lo, hi, sn])
+                   f'=IF(H{r}>0,B{r}/H{r},"—")', len(g['videos']), g['last'], '=$V$1', f'=MAX(0,L{r}-B{r})', lo, hi, sn,
+                   g.get('feat_n'), f'=IF(N(Q{r})>0,B{r}/Q{r},"—")', g.get('feat_avg_x')])
         for col, fmtx in (('C', '#,##0'), ('D', '#,##0'), ('E', '0.0%'), ('F', '0.0%'), ('G', '0.00'), ('I', '0'), ('N', '0.0%'), ('O', '0.0%')):
             ws[f'{col}{r}'].number_format = fmtx
-    for col, w in zip('ABCDEFGHIJKLMNOP', (40, 9, 16, 16, 8, 8, 12, 10, 10, 7, 17, 9, 9, 12, 12, 30)): ws.column_dimensions[col].width = w
+    for col, w in zip('ABCDEFGHIJKLMNOPQRS', (40, 9, 16, 16, 8, 8, 12, 10, 10, 7, 17, 9, 9, 12, 12, 30, 10, 12, 12)): ws.column_dimensions[col].width = w
     ws.freeze_panes = 'B2'
     tmp = os.path.join(os.path.dirname(path), f'~tmp{os.getpid()}.xlsx'); wb.save(tmp)
     try: os.replace(tmp, path)

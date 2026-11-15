@@ -172,6 +172,80 @@ def build_spins(series, vals, bet, gift_windows, seg_bounds):
         if win > 0: spins[-1]['win'] += win                 # deduction first, then this new spin's own win
     return spins, gifts, jumps, odd
 
+# ---------------- features (free games / hold & spin / bonus) ----------------
+FEATURE_GAP_S = 25           # in the base game a spin is paid every ~5-8 s; >= this long without paying = a feature ran
+
+def off_spans(stats):
+    """video spans where the recorder was busy with popups / lobby / a stuck screen (not game play)"""
+    out = []
+    for a, b, info in stats.get('timeline') or []:
+        try: i = json.loads(info) if isinstance(info, str) else (info or {})
+        except ValueError: i = {}
+        if any(i.get(k) for k in ('esc', 'lobby', 'frozen', 'x', 'btn')) or i.get('centre', 0) >= 3: out.append((a, b))
+    return out
+
+def find_features(spins, bet, excl=(), gap=FEATURE_GAP_S, series=None):
+    """a spin that won and after which no new bet was paid for >= gap seconds (outside popup / stuck spans) = a feature
+    was triggered on it (its win includes the whole feature). -> [{'spin', 't0', 't1', 'seconds', 'win', 'x'}]"""
+    feats = []
+    for k in range(len(spins) - 1):
+        s, t1 = spins[k], spins[k + 1]['t']; g = t1 - s['t']
+        if g < gap or s['win'] <= 0: continue
+        if any(a < t1 and b > s['t'] for a, b in excl): continue
+        if series is not None:                                 # meter unreadable most of the gap -> not evidence of a feature
+            inside = [v for t, v in series if s['t'] < t < t1]
+            if inside and sum(v is not None for v in inside) / len(inside) < 0.5: continue
+        feats.append({'spin': k + 1, 't0': s['t'], 't1': t1, 'seconds': round(g), 'win': float(s['win']), 'x': float(s['win'] / bet)})
+    return feats
+
+def confirm_features(feats, mp4, app_id, gift_windows=(), say=print):
+    """drop candidates that are really popups: the gap overlaps a gift / X-close tap, or the video is mostly NOT the slot
+    during the gap (3 frames checked with the app's in-game template; >= 2 must be in game)"""
+    feats = [f for f in feats if not any(a < f['t1'] and b > f['t0'] for a, b in gift_windows)]
+    if not feats: return feats
+    try:
+        from .app import App
+        app = App(app_id)
+    except Exception as e: say(f'feature check without frames: {e!r}'); return feats
+    cap = cv2.VideoCapture(mp4); out = []
+    if not cap.isOpened(): say('feature check: video not readable by OpenCV -> features not frame-checked'); return feats
+    try:
+        for f in feats:
+            ok = 0
+            for q in (0.3, 0.55, 0.8):
+                cap.set(cv2.CAP_PROP_POS_MSEC, (f['t0'] + (f['t1'] - f['t0']) * q) * 1000)
+                r, fr = cap.read()
+                try:
+                    if r and app.in_game(fr): ok += 1
+                except Exception: ok += 1                      # cannot check this frame -> do not reject on it
+            if ok >= 2: out.append(f)
+    finally: cap.release()
+    return out
+
+def feature_summary(feats, n_spins, tot_bet):
+    xs = [f['x'] for f in feats]
+    return {'count': len(feats), 'every_n': round(n_spins / len(feats), 1) if feats else None,
+            'avg_x': float(np.mean(xs)) if xs else None, 'max_x': float(max(xs)) if xs else None,
+            'rtp_share': float(sum(f['win'] for f in feats) / tot_bet) if tot_bet else 0.0, 'gap_s': FEATURE_GAP_S}
+
+def cut_features(mp4, feats, say=print, max_clips=60):
+    """<video>_features/NN_<time>_<x>x.mp4 (5 s before to 5 s after) + _start.jpg / _end.jpg, cut without re-encoding"""
+    out = mp4[:-4] + '_features'
+    if os.path.isdir(out):
+        for f in os.listdir(out): os.remove(os.path.join(out, f))
+    if not feats or not CFG.get('feature_clips', True): return
+    os.makedirs(out, exist_ok=True); ff = TOOLS['ffmpeg'] or 'ffmpeg'
+    for i, f in enumerate(sorted(feats, key=lambda f: -f['x'])[:max_clips], 1):
+        name = f"{i:02d}_{hms(f['t0']).replace(':', '')}_{f['x']:.0f}x"
+        a = max(0.0, f['t0'] - 5); dur = f['t1'] - f['t0'] + 10
+        subprocess.run([ff, '-v', 'error', '-y', '-ss', f'{a:.1f}', '-i', mp4, '-t', f'{dur:.1f}', '-c', 'copy', os.path.join(out, name + '.mp4')],
+                       creationflags=_NOWIN, capture_output=True)
+        for tag, t in (('start', f['t0'] + 2), ('end', max(f['t0'], f['t1'] - 1))):
+            subprocess.run([ff, '-v', 'error', '-y', '-ss', f'{t:.1f}', '-i', mp4, '-frames:v', '1', '-q:v', '3', os.path.join(out, f'{name}_{tag}.jpg')],
+                           creationflags=_NOWIN, capture_output=True)
+        f['clip'] = os.path.basename(out) + '/' + name + '.mp4'
+    say(f'feature clips: {min(len(feats), max_clips)} -> {os.path.basename(out)}')
+
 def analyze(mp4, app_id=None, fps=4, say=print):
     """analyse one video. A <video>.analyzing flag file exists while it runs (a merge waits for it instead of redoing it)."""
     lock = mp4[:-4] + '.analyzing'
@@ -232,6 +306,9 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
     off_s = sum(b - a for a, b, _ in (stats.get('timeline') or []))
     play_h = max(1e-6, (vid_s - off_s) / 3600)
     top = sorted(range(n), key=lambda i: -wins[i])[:10]
+    feats = confirm_features(find_features(spins, bet, off_spans(stats) + [(t - 1, t + 1) for t, _, _ in jumps], series=series), mp4, app_id, gift_windows, say)
+    try: cut_features(mp4, feats, say)
+    except Exception as e: say(f'feature clips failed: {e!r}')
     summary = {
         'video': os.path.basename(mp4), 'app': prof['name'], 'slot': stats.get('name') or stats.get('slot'),
         'video_length': hms(vid_s), 'play_hours': round(play_h, 3), 'off_game': hms(off_s),
@@ -243,6 +320,8 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
         'top_wins': [{'time': hms(spins[i]['t']), 'win': float(wins[i]), 'x': float(mult[i])} for i in top if wins[i] > 0],
         'gifts': [{'time': hms(t), 'coins': c} for t, c in gifts], 'jumps': [{'time': hms(t), 'coins': c, 'why': w} for t, c, w in jumps],
         'multi_spin_steps': len(odd),
+        'features': dict(feature_summary(feats, n, tot_bet), list=[{'time': hms(f['t0']), 'seconds': f['seconds'], 'win': f['win'],
+                                                                   'x': f['x'], 'clip': f.get('clip')} for f in feats]),
         'balance_first': vals[0][1] if vals else None, 'balance_last': vals[-1][1] if vals else None,
         'meter_read_rate': round(read_ok, 3), 'analysis_seconds': round(time.time() - t_start),
     }
@@ -273,6 +352,21 @@ def fmt(v):
     for unit, k in (('兆', 1e12), ('億', 1e8), ('萬', 1e4)):
         if a >= k: return f'{v / k:,.2f} {unit}'
     return f'{v:,.0f}'
+
+def _feat_html(s, merged=False):
+    e = html.escape; f = s.get('features') or {}
+    if not f: return ''
+    if not f.get('count'): return f'<h3>特色遊戲（自動偵測）</h3><p>這段影片沒有偵測到特色遊戲（{s["spins"]:,} 把）。</p>'
+    head = (f"<table><tr><th>項目</th><th>數值</th><th>白話</th></tr>"
+            f"<tr><td>觸發次數</td><td>{f['count']:,} 次</td><td>平均每 {f['every_n']} 把觸發一次</td></tr>"
+            f"<tr><td>特色平均贏分</td><td>{f['avg_x']:,.1f} 倍押注</td><td>最大 {f['max_x']:,.1f} 倍</td></tr>"
+            f"<tr><td>佔 RTP</td><td>{f['rtp_share']:.1%}</td><td>總回收裡有這麼多來自特色遊戲</td></tr></table>")
+    if merged: return '<h3>特色遊戲（自動偵測）</h3>' + head
+    link = lambda x: f"<a href='{e(x['clip'])}'>片段</a>" if x.get('clip') else ''
+    rows = ''.join(f"<tr><td>{x['time']}</td><td>{x['seconds']} 秒</td><td>{x['x']:,.1f} 倍</td><td>{fmt(x['win'])}</td>"
+                   f"<td>{link(x)}</td></tr>" for x in f.get('list', []))
+    return ('<h3>特色遊戲（自動偵測）</h3>' + head +
+            f"<table><tr><th>影片時間</th><th>長度</th><th>贏分倍數</th><th>贏分</th><th>片段</th></tr>{rows}</table>")
 
 def render_html(s):
     e = html.escape
@@ -308,9 +402,12 @@ th{{background:#f3f3f3}}td:first-child,th:first-child{{text-align:left}}.big{{fo
 <table><tr><th>贏分</th><th>次數</th><th>頻率</th><th>佔 RTP</th></tr>{rows}</table>
 <h3>前 10 大獎（影片時間，可直接跳去看）</h3>
 <table><tr><th>影片時間</th><th>贏分</th><th>押注倍數</th></tr>{tops}</table>
+{_feat_html(s)}
 <h3>非贏分的金額變動</h3>
 <table><tr><th>影片時間</th><th>金額</th><th>說明</th></tr>{gifts or '<tr><td colspan=3>無</td></tr>'}</table>
 <h3>注意事項</h3><ul>{w}<li>贏分＝餘額增加；免費遊戲、特色遊戲的贏分算在觸發的那一把。</li>
+<li>特色遊戲＝某一把贏分後超過 {FEATURE_GAP_S} 秒沒有再扣押注（免費遊戲、Hold &amp; Spin 這類期間不扣錢），而且期間畫面仍是遊戲本身；
+彈窗、領獎、卡住的時段不算。很長的大獎動畫可能被算進來；整個畫面換成另一個小遊戲的特色可能漏算。請用片段確認。</li>
 <li>關彈窗前後 12 秒內的加錢視為「贈送」，不算贏分（可能把少數真的贏分誤判成贈送，見上表）。</li></ul>
 <p style="color:#888">餘額讀取率 {s['meter_read_rate']:.0%}，分析耗時 {s['analysis_seconds']} 秒</p></html>"""
 
@@ -388,6 +485,7 @@ def merge(videos, out_base, app_id=None, say=print):
         'top_wins': [{'video': allsp[i][0], 'time': allsp[i][1], 'win': allsp[i][3], 'x': float(mult[i])} for i in top if mult[i] > 0],
         'gifts_total': sum(sum(g['coins'] for g in s.get('gifts', [])) for _, s, _, _ in parts),
         'gifts_n': sum(len(s.get('gifts', [])) for _, s, _, _ in parts),
+        'features': _merge_features(parts, n, core['total_bet']),
         'meter_read_rate': min(s['meter_read_rate'] for _, s, _, _ in parts),
     }
     with open(out_base + '_spins.tsv', 'w', encoding='utf-8') as f:
@@ -399,6 +497,13 @@ def merge(videos, out_base, app_id=None, say=print):
     lo, hi = core['rtp_95']
     say(f"MERGED {len(parts)} videos, spins {n}  RTP {core['rtp']:.1%} ({lo and f'{lo:.0%}'}~{hi and f'{hi:.0%}'})  -> {out_base}_summary.html")
     return summary
+
+def _merge_features(parts, n, tot_bet):
+    with_f = [s for _, s, _, _ in parts if s.get('features') is not None]     # older analyses have no feature data
+    if not with_f: return {}
+    fl = [x for s in with_f for x in (s['features'].get('list') or [])]
+    return feature_summary([{'x': x['x'], 'win': x['win']} for x in fl], sum(s['spins'] for s in with_f),
+                           sum(s['total_bet'] for s in with_f))
 
 def render_merged_html(s):
     e = html.escape
@@ -429,6 +534,7 @@ th{{background:#f3f3f3}}td:first-child,th:first-child{{text-align:left}}.big{{fo
 <tr><td>每小時輸贏（一台）</td><td>{fmt(s['net_per_hour'])}</td><td>約 {s['net_per_hour_in_bets']:,.0f} 注／小時</td></tr>
 <tr><td>總押注 / 總贏分</td><td>{fmt(s['total_bet'])} / {fmt(s['total_win'])}</td><td></td></tr>
 <tr><td>關彈窗時加的錢</td><td>{fmt(s['gifts_total'])}</td><td>{s['gifts_n']} 次，不算贏分</td></tr></table>
+{_feat_html(s, merged=True)}
 <h3>各支影片</h3>
 <table><tr><th>影片</th><th>模擬器</th><th>長度</th><th>局數</th><th>RTP</th><th>押注</th><th>餘額讀取率</th></tr>{vids}</table>
 <h3>贏分大小分布（以押注倍數計）</h3>

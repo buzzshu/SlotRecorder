@@ -15,6 +15,7 @@ def main():
     ap.add_argument('--minutes', type=float, help='override slots.csv minutes (tests)')
     ap.add_argument('--split', type=int, default=1, help='this job is 1 of N emulators sharing the minutes')
     ap.add_argument('--group', default='', help='id shared by the N jobs of one multi-emulator run')
+    ap.add_argument('--precise', action='store_true', help='夠準就停: record each slot until its RTP range is narrow enough')
     a = ap.parse_args()
     if a.emu is not None: os.environ['SLOTREC_LD_INDEX'] = str(a.emu)     # before importing config -> children inherit
     from .config import ROOT as _R
@@ -23,8 +24,10 @@ def main():
         _j = json.load(open(_jp, encoding='utf-8'))
         if _j.get('emulator') is not None: os.environ['SLOTREC_LD_INDEX'] = str(_j['emulator'])
         a.split = a.split if a.split > 1 else int(_j.get('split') or 1); a.group = a.group or _j.get('group') or ''
+        a.precise = a.precise or bool(_j.get('precise'))
     if os.environ.get('SLOTREC_LD_INDEX'): os.environ.setdefault('SLOTREC_STOP_IDX', str(a.emu if a.emu is not None else os.environ['SLOTREC_LD_INDEX']))
     if a.group: os.environ['SLOTREC_GROUP'] = a.group; os.environ['SLOTREC_SPLIT'] = str(max(1, a.split))
+    if a.precise: os.environ['SLOTREC_PRECISE'] = '1'
     from .config import ROOT
     LOG_DIR = os.path.join(ROOT, 'logs'); os.makedirs(LOG_DIR, exist_ok=True)
     os.environ.setdefault('SLOTREC_LOG', os.path.join(LOG_DIR, f'job_{a.job}.log'))   # children inherit -> one log file
@@ -34,7 +37,7 @@ def main():
         d.log('STOP file present from an earlier run -> removed'); os.remove(d.stop_file())
     res = {'reason': 'error'}                                # why the job ended -> GUI auto-resume only after a crash / reboot
     try:
-        rc = run(a.app, [s for s in a.slots.split(',') if s], a.job, LOG_DIR, a.minutes, max(1, a.split), a.group, res)
+        rc = run(a.app, [s for s in a.slots.split(',') if s], a.job, LOG_DIR, a.minutes, max(1, a.split), a.group, res, a.precise)
     except d.StopRequested:
         res['reason'] = 'stopped'; rc = 2
     finally:
@@ -71,14 +74,14 @@ def ensure_app(app, say):
     if not app.to_lobby(max_steps=80, restart_ok=False): say('lobby not reached yet -> the recorder keeps trying')
     return True
 
-def run(app_id, slot_ids, job, log_dir, minutes=None, split=1, group='', res=None):
+def run(app_id, slot_ids, job, log_dir, minutes=None, split=1, group='', res=None, precise=False):
     from .app import App
     from . import device as d
     from .device import log
     app = App(app_id); rows = {r['id']: r for r in app.slots()}
     jp = os.path.join(log_dir, f'job_{job}.json')
     st = json.load(open(jp, encoding='utf-8')) if os.path.exists(jp) else {'app': app_id, 'slots': slot_ids, 'status': {}}
-    st['emulator'] = d.IDX; st['split'] = split; st['group'] = group
+    st['emulator'] = d.IDX; st['split'] = split; st['group'] = group; st['precise'] = precise
     st['pid'] = os.getpid(); st['finished'] = None; st['started'] = time.strftime('%F %T')     # running (see mark_finished)
     res = res if res is not None else {}
     sw = os.path.join(log_dir, f'job_{job}.emu'); os.environ['SLOTREC_SWITCH_FILE'] = sw   # record writes a new emulator index here
@@ -96,8 +99,19 @@ def run(app_id, slot_ids, job, log_dir, minutes=None, split=1, group='', res=Non
         if st['status'].get(sid, {}).get('result') == 'done': log(f'skip {sid} (already done)'); continue
         r = rows.get(sid, {'name': sid, 'minutes': 60})
         mins = minutes or float(r.get('minutes') or 60)
+        if precise and not minutes:                            # 夠準就停: the list's minutes become the per-game cap
+            from .config import CFG
+            mins = float(CFG.get('precise_max_minutes') or 240)
         if split > 1 and not minutes: mins = max(1, math.ceil(mins / split))
         log(f'SLOT {i}/{len(slot_ids)} {sid}')
+        if precise:
+            try:
+                from .live import already_precise
+                done_, n_, h_ = already_precise(app_id, sid, group)
+                if done_:
+                    log(f'PRECISION reached already: {n_} spins, +-{h_ * 100:.1f} pp -> skip {sid}')
+                    st['status'][sid] = {'result': 'done', 'note': 'already precise', 'end': time.strftime('%F %T')}; save(); continue
+            except Exception as e: log('precision pre-check failed', repr(e))
         st['status'][sid] = {'result': 'running', 'start': time.strftime('%F %T')}; save()
         rc = subprocess.call([sys.executable, '-u', '-m', 'core.record', '--app', app_id, '--slot', sid,
                               '--minutes', str(mins), '--name', r.get('name') or sid], cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

@@ -167,6 +167,20 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                 f'resets={st["resets"]} bet={st["bet"] or "-"} ram={d.free_ram_gb():.1f}GB')
 
     start_seg(secs)
+    live = None; last_live = 0; precise = os.environ.get('SLOTREC_PRECISE') == '1'; READ_EVERY_S = 2.5
+    def read_bal(im):
+        """balance with the CURRENT layout; never re-detects orientation from this screenshot (a lobby / popup frame
+        would flip the spin position). Frames whose orientation differs from the slot's -> None"""
+        L = app.lay()
+        if bool(getattr(app, '_land', False)) != (im.shape[1] > im.shape[0]): return None
+        box = (L.get('meters') or {}).get('balance')
+        return ocr.read_box(im, box) if box else None
+    if CFG.get('live_stats', True) and (p.get('meters') or {}).get('balance'):
+        try:
+            from .live import Live, READ_EVERY_S
+            live = Live(app_id, slot_id, group, d.IDX)
+            if precise: log(f'夠準就停: earlier videos of this game give {len(live.prior)} spins')
+        except Exception as e: log('live stats off:', repr(e))
     last_chk = last_snap = last_prog = last_meter = 0; last_betchk = time.time(); off_since = None; back_streak = 0
     prev_sig = None; same_since = None; popup_times = []; last_reset_t = None; centre_taps = 0
     span = {}                                                  # current off-game span (video time + what was done)
@@ -202,6 +216,8 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                 try:
                     now = time.time()
                     ig = app.in_game(im)
+                    if live and ig and off_since is None:
+                        live.add(vt(), read_bal(im)); last_live = now
 
                     # ---- out of coins: template, or balance meter below N bets (checked once a minute while in game)
                     poor = False
@@ -245,6 +261,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                             raise RuntimeError('cannot re-enter slot after reset')
                         if d.IDX != st['emulator']: st.setdefault('emulators', [st['emulator']]).append(d.IDX); st['emulator'] = d.IDX
                         st['bet'] = app.min_bet() or st['bet']; start_seg(secs - recorded())
+                        if live: live.boundary(vt())
                         off_since = same_since = prev_sig = None; reset_rep(); last_chk = time.time(); status('game', True)
                         continue
 
@@ -313,6 +330,18 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                     if now - last_prog >= 60:                     # machine-readable progress line for the GUI
                         last_prog = now
                         log(f'PROGRESS {int(vt())}/{secs}'); status(state['s'], True)
+                        if live:
+                            try:
+                                offs = [(a, b) for a, b, info in st['timeline'] if removable((a, b, info))]
+                                r = live.update(st['bet'], st['taps'], offs)
+                                if r:
+                                    st['live'] = r; pc = lambda x: '-' if x is None else f'{x:.4f}'
+                                    log(f"LIVE spins={r['spins']} rtp={r['rtp']:.4f} lo={pc(r['lo'])} hi={pc(r['hi'])} feats={r['feats']} "
+                                        f"total={r['total']} half={pc(r['half'])} reads={r['reads']}")
+                                    if precise and live.precise():
+                                        log(f"PRECISION reached: {r['total']} spins, RTP {r['total_rtp']:.1%} +-{r['half'] * 100:.1f} pp -> stop")
+                                        st['stopped'] = 'precise'; break
+                            except Exception as e: log('live stats failed', repr(e))
                         if d.free_disk_gb(vdir) < MIN_FREE_DISK_GB:
                             log(f'DISK almost full ({d.free_disk_gb(vdir):.1f} GB) -> stop and keep what was recorded')
                             st['stopped'] = 'disk full'; break
@@ -322,6 +351,11 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                     st['errors'] += 1; log('check step failed:', repr(e))
                     if st['errors'] > 100: raise
             if off_since is None:
+                if live and time.time() - last_live >= READ_EVERY_S:   # balance before a spin -> live statistics
+                    try: live.add(vt(), read_bal(d.grab()))
+                    except StopRequested: raise
+                    except Exception: pass
+                    last_live = time.time()
                 d.tap(*app.lay()['spin_xy']); st['spins'] += 1
             time.sleep(interval)
     except StopRequested:
@@ -331,6 +365,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
     finally:
         try: close_span()
         except Exception: pass
+        if live: live.close()
         try: close_seg()
         except Exception as e: log('close_seg failed', repr(e))
         log('STATUS finishing')
@@ -347,7 +382,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                     except OSError: pass
                 os.remove(lst)
                 st['video_s'] = round(probe(mp4), 1)
-                ok = st['video_s'] >= secs * 0.95
+                ok = st['video_s'] >= secs * 0.95 or st.get('stopped') == 'precise'
         st['ok'] = ok; st['file'] = mp4
         if os.path.exists(mp4):
             try: finish_outputs(mp4, st)
