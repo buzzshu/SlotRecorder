@@ -154,17 +154,24 @@ SR_PREFIX = 'SR_'                        # instances created by SlotRecorder; th
 def cache_apk(pkg, src_serial, say=log):
     """keep a copy of the app's (split) APKs in apk_cache/<pkg>/ so a brand-new emulator can be set up without a source"""
     dst = os.path.join(APK_CACHE, pkg)
-    if os.path.isdir(dst) and any(f.endswith('.apk') for f in os.listdir(dst)): return True
+    if apk_cached(pkg): return True
     out = (adb('shell', 'pm', 'path', pkg, out=True, serial=src_serial) or b'').decode(errors='ignore')
     paths = [l.split(':', 1)[1].strip() for l in out.splitlines() if l.startswith('package:')]
     if not paths: say(f'cache_apk: {pkg} not installed on {src_serial}'); return False
-    os.makedirs(dst, exist_ok=True)
-    for i, p in enumerate(paths):
-        subprocess.run([ADB, '-s', src_serial, 'pull', p, os.path.join(dst, f'{i}_{os.path.basename(p)}')],
+    tmp = f'{dst}.tmp{os.getpid()}'; os.makedirs(tmp, exist_ok=True)      # pull aside, then move in one step:
+    for i, p in enumerate(paths):                                        # other jobs never see a half-filled cache
+        subprocess.run([ADB, '-s', src_serial, 'pull', p, os.path.join(tmp, f'{i}_{os.path.basename(p)}')],
                        capture_output=True, timeout=600, creationflags=_NOWIN)
-    ok = all(os.path.exists(os.path.join(dst, f'{i}_{os.path.basename(p)}')) for i, p in enumerate(paths))
-    if not ok: shutil.rmtree(dst, ignore_errors=True)
+    ok = all(os.path.exists(os.path.join(tmp, f'{i}_{os.path.basename(p)}')) for i, p in enumerate(paths))
+    if ok:
+        try: os.replace(tmp, dst)
+        except OSError: ok = apk_cached(pkg)                         # another job finished first -> use theirs
+    shutil.rmtree(tmp, ignore_errors=True)
     say(f'cache_apk {pkg}: {len(paths)} apk(s) ' + ('ok' if ok else 'FAILED')); return ok
+
+def apk_cached(pkg):
+    d_ = os.path.join(APK_CACHE, pkg)
+    return os.path.isdir(d_) and any(f.endswith('.apk') for f in os.listdir(d_))
 
 def install_cached(pkg, serial, say=log):
     d_ = os.path.join(APK_CACHE, pkg)

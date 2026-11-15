@@ -94,7 +94,8 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
     vdir = video_dir(app_id)
     if d.free_disk_gb(vdir) < MIN_FREE_DISK_GB + minutes / 60 * 1.5:
         log(f'not enough disk space in {vdir}: {d.free_disk_gb(vdir):.1f} GB free'); return 2
-    base = os.path.join(vdir, f'{time.strftime("%Y%m%d_%H%M%S")}_{name}')
+    group = os.environ.get('SLOTREC_GROUP', '')              # multi-emulator run: several jobs start the same slot together
+    base = os.path.join(vdir, f'{time.strftime("%Y%m%d_%H%M%S")}_{name}' + (f'_e{d.IDX}' if group else ''))
     snapdir = base + '_snaps'; os.makedirs(snapdir, exist_ok=True)
     log(f'=== {p["name"]} / {name}  {minutes} min  (emulator {d.IDX} {d.SER}) ===')
     log('STATUS entering')
@@ -102,7 +103,8 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
 
     from .version import VERSION
     st = dict(version=VERSION, app=app_id, slot=slot_id, name=name, emulator=d.IDX, spins=0, popups=0, restarts=0, reenter=0, offgame_s=0,
-              stalls=0, backs=0, escalations=[], errors=0, resets=0, bet=None, bet_changes=0, timeline=[], taps=[])
+              stalls=0, backs=0, escalations=[], errors=0, resets=0, bet=None, bet_changes=0, timeline=[], taps=[],
+              group=group, split=int(os.environ.get('SLOTREC_SPLIT') or 1))
     try:
         app.guard_focus()
         # always enter through the lobby: a slot that is already open may be a DIFFERENT game (left by an earlier job)
@@ -347,11 +349,17 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
         with open(base + '_stats.json', 'w', encoding='utf-8') as f: json.dump(st, f, indent=1, ensure_ascii=False)
         log('done', 'OK' if ok else 'INCOMPLETE', f"video {st.get('video_s', 0)}s ->", mp4)
         if os.path.exists(mp4) and st.get('video_s', 0) >= 120 and CFG.get('auto_analyze', True):
+            flag = base + '.analyzing'                  # set BEFORE the spawn: a merge must not start the same analysis
             try:                                        # statistics in the background, low priority; next slot starts now
-                subprocess.Popen([sys.executable, '-m', 'core.analyze', mp4], cwd=ROOT, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, creationflags=_NOWIN | getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0))
+                open(flag, 'w').close()
+                pr = subprocess.Popen([sys.executable, '-m', 'core.analyze', mp4], cwd=ROOT, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.DEVNULL, creationflags=_NOWIN | getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0))
+                with open(flag, 'w') as f: f.write(str(pr.pid))
                 log('analysis started in background ->', os.path.basename(base) + '_summary.html')
-            except Exception as e: log('could not start analysis', repr(e))
+            except Exception as e:
+                log('could not start analysis', repr(e))
+                try: os.remove(flag)
+                except OSError: pass
     return 0 if ok else 2
 
 def removable(row):

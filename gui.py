@@ -13,6 +13,7 @@ from core import device as d
 from core.version import VERSION
 
 STOP_ALL = d.STOP_ALL
+MAX_MULTI = 6                       # 同時用 N 台: upper limit of the spinbox
 LOG_DIR = os.path.join(ROOT, 'logs'); os.makedirs(LOG_DIR, exist_ok=True)
 NOWIN = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 PY = sys.executable.replace('pythonw.exe', 'python.exe')
@@ -31,6 +32,7 @@ class Gui(tk.Tk):
         self.title(f'SlotRecorder v{VERSION} — 自動錄製 slot 影片')
         self.geometry('1250x760'); self.minsize(1000, 600)
         self.q = queue.Queue(); self.apps = list_apps(); self.jobs = {}     # emulator index -> job dict
+        self.groups = {}                                                    # multi-emulator run id -> {'app', 'idxs', 'merged'}
         self.devlock = threading.Lock()
         self._build(); self.after(150, self._poll); self.after(1000, self._tick)
         self.protocol('WM_DELETE_WINDOW', self._on_close)
@@ -81,6 +83,10 @@ class Gui(tk.Tk):
         right = ttk.Frame(body); body.add(right, weight=2)
         run = ttk.Frame(right); run.pack(fill='x')
         self.btn_start = ttk.Button(run, text='▶ 開始錄製', command=self._start); self.btn_start.pack(side='left')
+        ttk.Label(run, text=' 同時用').pack(side='left')
+        self.n_var = tk.IntVar(value=1)
+        ttk.Spinbox(run, from_=1, to=MAX_MULTI, width=3, textvariable=self.n_var, state='readonly').pack(side='left')
+        ttk.Label(run, text='台').pack(side='left', padx=(0, 6))
         ttk.Button(run, text='⏰ 定時開始', command=self._schedule).pack(side='left', padx=4)
         ttk.Button(run, text='↻ 接續上次', command=self._resume).pack(side='left')
         ttk.Button(run, text='■ 停止此台', command=self._stop).pack(side='left', padx=(12, 4))
@@ -187,9 +193,13 @@ class Gui(tk.Tk):
                 try: d.use(idx); fn()
                 except Exception as e: self.q.put(('log', f'錯誤：{e!r}'))
         self._bg(wrapped)
+    def _alive(self, j): return bool(j and j.get('proc') and j['proc'].poll() is None)
     def running(self, idx):
+        """emulator idx is busy: a lobby scan, a job started on it or moved to it, or reserved by a multi-run being set up"""
         if getattr(self, 'scanning', None) == idx: return True                  # lobby scan uses that emulator
-        j = self.jobs.get(idx); return bool(j and j.get('proc') and j['proc'].poll() is None)
+        j = self.jobs.get(idx)
+        if j and (j.get('prep') or self._alive(j)): return True
+        return any(self._alive(o) and o.get('on') == idx for o in self.jobs.values())
     def _busy(self):
         if self.running(self.emu()):
             messagebox.showinfo('錄製中', f'模擬器 {self.emu_name(self.emu())} 正在錄製，這個動作會干擾錄影。請選別台或先停止。', parent=self); return True
@@ -472,6 +482,8 @@ class Gui(tk.Tk):
         self._save_tree(); ids = self._checked()
         if not ids: messagebox.showinfo('開始錄製', '請先勾選要錄的 slot（雙擊「錄」欄）', parent=self); return
         total = sum(float(self.tree.set(i, 'min') or 60) for i in ids)
+        n = max(1, min(MAX_MULTI, int(self.n_var.get() or 1)))
+        if n > 1: return self._start_multi(a, idx, ids, n, at)
         if at is None:
             if not messagebox.askokcancel('開始錄製', f'{a.p["name"]} @ 模擬器 {self.emu_name(idx)}：{len(ids)} 款，共 {total:.0f} 分鐘\n\n'
                                           '錄製期間請不要操作這台模擬器。要中途停止請按「■ 停止此台」。', parent=self): return
@@ -481,6 +493,58 @@ class Gui(tk.Tk):
             self.jobs[idx] = {'sched': at, 'app': a.id, 'slots': ids, 'state': f'排程 {time.strftime("%m/%d %H:%M", time.localtime(at))}', 'cur': f'{len(ids)} 款 {total:.0f} 分'}
             self.log(f'⏰ 已排程：模擬器 {self.emu_name(idx)} 在 {time.strftime("%m/%d %H:%M", time.localtime(at))} 開始錄 {", ".join(ids)}（GUI 視窗要開著）')
             self._refresh_jobs()
+    # ---------------- 同時用 N 台：the same slots on N emulators, each records 1/N of the minutes ----------------
+    def _multi_plan(self, idx, n):
+        """-> (existing emulator indexes to use, number of new SR_ emulators to create). The selected one first, then
+        emulators SlotRecorder created (SR_), then the other existing ones; none that is recording / scanning."""
+        inst = d.instances() if TOOLS['ldconsole'] else []
+        sched = {k for k, j in self.jobs.items() if j.get('sched') and not j.get('proc')}
+        free = [i for i, nm, _ in inst if i != idx and not self.running(i) and i not in sched]
+        sr = [i for i in free if dict((k, v) for k, v, _ in inst)[i].startswith(d.SR_PREFIX)]
+        use = ([idx] + sr + [i for i in free if i not in sr])[:n]
+        return use, n - len(use), {i: (nm, run) for i, nm, run in inst}
+    def _start_multi(self, a, idx, ids, n, at=None, ask=True):
+        rows = {i: float(self.tree.set(i, 'min') or 60) for i in ids} if ask else {r['id']: float(r.get('minutes') or 60) for r in a.slots()}
+        per = {i: max(1, -(-rows.get(i, 60) // n)) for i in ids}                  # ceil(minutes / n) for each emulator
+        use, new, inst = self._multi_plan(idx, n)
+        if new and not TOOLS['ldconsole']: messagebox.showerror('同時錄製', '找不到 ldconsole.exe，無法建立新模擬器（設定 → LDPlayer 資料夾）', parent=self); return
+        if at is not None:
+            self.jobs[idx] = {'sched': at, 'app': a.id, 'slots': ids, 'n': n, 'state': f'排程 {time.strftime("%m/%d %H:%M", time.localtime(at))}',
+                              'cur': f'{len(ids)} 款 × {n} 台'}
+            self.log(f'⏰ 已排程：{n} 台同時錄 {", ".join(ids)}，{time.strftime("%m/%d %H:%M", time.localtime(at))} 開始（GUI 視窗要開著）')
+            self._refresh_jobs(); return
+        boot = sum(1 for i in use if not inst.get(i, ('', False))[1]) + new
+        if ask:
+            names = [f'{i} {inst.get(i, (str(i),))[0]}' for i in use] + [f'新建 SR_ 模擬器 ×{new}'] * bool(new)
+            mins = sum(per.values())
+            msg = (f'{a.p["name"]}：{len(ids)} 款，每款由 {n} 台同時錄，每台每款錄 {", ".join(f"{v:.0f}" for v in dict.fromkeys(per.values()))} 分鐘\n'
+                   f'→ 約 {mins:.0f} 分鐘後全部錄完（單台要 {sum(rows[i] for i in ids):.0f} 分鐘）\n\n使用：{"、".join(names)}\n')
+            if new:
+                msg += (f'\n新模擬器會自動建立（約 2 分鐘）、從現有模擬器複製 {a.p["name"]}、以新帳號開始。'
+                        + ('\n88 Fortunes 的新帳號要先練到約 5 級才開得了多數遊戲，這幾台會晚 15~40 分鐘才開始錄。' if a.p.get('leveling') else '') +
+                        '\n錄完後新模擬器會關機但保留，下次多台錄製會優先再用。')
+            msg += '\n\n錄完會自動把同一款的多支影片合併成一份統計報告。錄製期間請不要操作這些模擬器。'
+            if not messagebox.askokcancel('同時錄製', msg, parent=self): return
+            need = 4.5 * boot + 1
+            if d.free_ram_gb() < need and not messagebox.askyesno('資源不足', f'要開 {boot} 台模擬器，建議至少 {need:.0f} GB 記憶體，目前剩 {d.free_ram_gb():.1f} GB。\n'
+                                                                  f'記憶體不足時錄影可能被系統中止。仍要開始嗎？', parent=self): return
+            vd = video_dir(a.id); need_disk = sum(per.values()) * n / 60 * 1.5 + 1
+            if d.free_disk_gb(vd) < need_disk and not messagebox.askyesno('資源不足', f'硬碟只剩 {d.free_disk_gb(vd):.1f} GB，這次約需 {need_disk:.0f} GB。仍要開始嗎？', parent=self): return
+        group = 'G' + time.strftime('%Y%m%d_%H%M%S')
+        self.groups[group] = {'app': a.id, 'idxs': set(), 'merged': False}
+        self.log(f'=== 同時錄製 {group}：{n} 台 × {len(ids)} 款（新建 {new} 台）===')
+        for i in use: self.jobs[i] = {'prep': True, 'app': a.id, 'state': '準備中', 'cur': f'{len(ids)} 款 × {n} 台', 'group': group}
+        self._refresh_jobs()
+        def work():
+            say = lambda s: self.q.put(('log', s)); got = list(use)
+            for k in range(new):
+                say(f'建立新模擬器 {k + 1}/{new}…')
+                try: i = d.new_instance(say)
+                except Exception as e: say(f'✘ 建立失敗 {e!r}'); i = None
+                if i is None: say('✘ 建立失敗，用現有的台數開始'); break
+                got.append(i)
+            self.q.put(('emus', None)); self.q.put(('multi_go', group, a.id, ids, got, n))
+        self._bg(work)
     def _schedule(self):
         v = simpledialog.askstring('定時開始', '幾點開始？（24 小時制，例如 22:30；已過的時間 = 明天）\n'
                                    '會用「目前選的 App、模擬器、勾選的 slot」。時間到會自動開模擬器。GUI 視窗要保持開著。', parent=self)
@@ -497,17 +561,21 @@ class Gui(tk.Tk):
         if not os.path.exists(p): messagebox.showinfo('接續上次', f'模擬器 {self.emu_name(idx)} 沒有上次的工作紀錄', parent=self); return
         if self.running(idx): messagebox.showinfo('接續上次', '這台正在錄製中', parent=self); return
         j = json.load(open(p)); self.log(f'--- 接續工作 {j["job"]}（已完成的 slot 會跳過）---')
-        self._launch(idx, j['app'], j['slots'], j['job'])
-    def _launch(self, idx, app_id, ids, job):
-        if self.running(idx): return
+        self._launch(idx, j['app'], j['slots'], j['job'], int(j.get('split') or 1), j.get('group') or '')
+    def _launch(self, idx, app_id, ids, job, split=1, group=''):
+        if self._alive(self.jobs.get(idx)) or any(self._alive(o) and o.get('on') == idx for o in self.jobs.values()): return
         sf = d.stop_file(idx)
         if os.path.exists(sf): os.remove(sf)
         if os.path.exists(STOP_ALL): os.remove(STOP_ALL); self.log('（移除了上次留下的全域 STOP 檔）')
-        json.dump({'app': app_id, 'slots': ids, 'job': job, 'emu': idx}, open(last_job_path(idx), 'w'))
+        json.dump({'app': app_id, 'slots': ids, 'job': job, 'emu': idx, 'split': split, 'group': group}, open(last_job_path(idx), 'w'))
         env = dict(os.environ, PYTHONIOENCODING='utf-8', PYTHONUTF8='1', SLOTREC_LOG=os.path.join(LOG_DIR, f'job_{job}.log'))
-        proc = subprocess.Popen([PY, '-u', '-m', 'core.batch', '--app', app_id, '--slots', ','.join(ids), '--job', job, '--emu', str(idx)],
+        extra = ['--split', str(split), '--group', group] if group else []
+        proc = subprocess.Popen([PY, '-u', '-m', 'core.batch', '--app', app_id, '--slots', ','.join(ids), '--job', job, '--emu', str(idx), *extra],
                                 cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=NOWIN)
-        self.jobs[idx] = {'proc': proc, 'app': app_id, 'slots': ids, 'job': job, 'state': '啟動中', 'cur': '', 'prog': 0, 'pop': '', 'off': '', 'note': ''}
+        self.jobs[idx] = {'proc': proc, 'app': app_id, 'slots': ids, 'job': job, 'state': '啟動中', 'cur': '', 'prog': 0, 'pop': '', 'off': '',
+                          'note': f'同時錄製 {split} 台之一' if group else '', 'group': group}
+        if group:
+            g = self.groups.setdefault(group, {'app': app_id, 'idxs': set(), 'merged': False}); g['idxs'].add(idx); g['merged'] = False
         def reader(p=proc):
             for raw in p.stdout: self.q.put(('run', idx, raw.decode('utf-8', 'replace')))
             p.wait(); self.q.put(('ended', idx, p.returncode))
@@ -542,10 +610,15 @@ class Gui(tk.Tk):
         if not fs: return
         self.log(f'--- 分析 {len(fs)} 支影片（每小時影片約 2 分鐘）---')
         def work():
-            p = subprocess.Popen([PY, '-u', '-m', 'core.analyze', *fs] + (['--app', a.id] if a else []), cwd=ROOT,
+            p = subprocess.Popen([PY, '-u', '-m', 'core.analyze', *fs] + (['--app', a.id] if a else []) + (['--merge'] if len(fs) > 1 else []), cwd=ROOT,
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=NOWIN, env=dict(os.environ, PYTHONIOENCODING='utf-8'))
-            for raw in p.stdout: self.q.put(('log', raw.decode('utf-8', 'replace')))
+            merged = []
+            for raw in p.stdout:
+                s = raw.decode('utf-8', 'replace'); self.q.put(('log', s))
+                m = re.search(r'-> (.+_merged_summary\.html)', s)
+                if m: merged.append(m.group(1).strip())
             p.wait()
+            if merged: self.q.put(('merged', merged)); return          # several videos of one slot -> show the merged report
             for f in fs:
                 h = f[:-4] + '_summary.html'
                 if os.path.exists(h) and os.path.getmtime(h) > time.time() - 3600: os.startfile(h)
@@ -580,7 +653,9 @@ class Gui(tk.Tk):
                 if j.get('sched') and not j.get('proc') and time.time() >= j['sched']:
                     self.log(f'⏰ 排程時間到：模擬器 {self.emu_name(idx)}（記憶體剩 {d.free_ram_gb():.1f} GB）')
                     if d.free_ram_gb() < 2.5: self.log('⚠ 記憶體偏低，錄影可能被系統中止')
-                    self._launch(idx, j['app'], j['slots'], time.strftime('%Y%m%d_%H%M%S') + f'_e{idx}')
+                    if (j.get('n') or 1) > 1:
+                        j['sched'] = None; self._start_multi(App(j['app']), idx, j['slots'], j['n'], ask=False)
+                    else: self._launch(idx, j['app'], j['slots'], time.strftime('%Y%m%d_%H%M%S') + f'_e{idx}')
         except Exception as e:
             self.log(f'排程啟動失敗：{e!r}')
             for j in self.jobs.values():
@@ -598,6 +673,13 @@ class Gui(tk.Tk):
                 elif kind == 'crop': self._crop_dialog(item[1])
                 elif kind == 'tpl': self._tpl_dialog(item[1])
                 elif kind == 'emus': self._load_emus()
+                elif kind == 'multi_go':
+                    _, group, app_id, ids, got, n = item
+                    for i in got: self._launch(i, app_id, ids, f'{group}_e{i}', n, group)
+                    if len(got) < n: self.log(f'⚠ 只有 {len(got)} 台可用；每台仍錄 1/{n} 的時間，合計會比設定的少')
+                elif kind == 'merged':
+                    for h in item[1]:
+                        if os.path.exists(h): os.startfile(h)
                 elif kind == 'reload':
                     self.scanning = None; self.btn_scan['state'] = 'normal'; self._load_slots()
                     self.log('=== 掃描完成，清單已更新 ===' if item[1] == 0 else f'=== 掃描失敗（rc={item[1]}），看上面的訊息 ===')
@@ -616,7 +698,7 @@ class Gui(tk.Tk):
                     elif 'OUT OF COINS' in v: j['note'] = '⚠ 金幣不足，已停止（影片保留）'
                     elif 'EMULATOR SWITCHED' in v:
                         m2 = re.search(r'SWITCHED (\d+) -> (\d+)', v)
-                        if m2: j['note'] = f'已換到新模擬器 {m2.group(2)}'; self.q.put(('emus', None))
+                        if m2: j['note'] = f'已換到新模擬器 {m2.group(2)}'; j['on'] = int(m2.group(2)); self.q.put(('emus', None))
                     elif 'switching emulator' in v: j['note'] = '建立新模擬器中（約 15 分鐘）'
                     elif 'ESCALATE' in v: j['note'] = '處理卡住 ' + time.strftime('%H:%M')
                     elif 'WARNING low memory' in v: j['note'] = '⚠ 記憶體不足'
@@ -628,9 +710,28 @@ class Gui(tk.Tk):
                     sf = d.stop_file(idx)
                     if os.path.exists(sf): os.remove(sf)
                     self.log(f'=== 模擬器 {self.emu_name(idx)} 工作結束 ===')
+                    self._maybe_merge(j.get('group'))
         except queue.Empty: pass
         if dirty: self._refresh_jobs()
         self.after(150, self._poll)
+
+    def _maybe_merge(self, group):
+        """last emulator of a multi-emulator run finished -> merge its videos per slot (background, low priority)"""
+        g = self.groups.get(group or '')
+        if not g or g['merged']: return
+        if any(self._alive(self.jobs.get(i)) and self.jobs[i].get('group') == group for i in g['idxs']): return
+        g['merged'] = True; self.log(f'--- {group}：全部錄完，合併同一款的影片並產生統計報告（每小時影片約 2 分鐘）---')
+        def work():
+            p = subprocess.Popen([PY, '-u', '-m', 'core.analyze', '--group', group, '--app', g['app']], cwd=ROOT, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, env=dict(os.environ, PYTHONIOENCODING='utf-8'),
+                                 creationflags=NOWIN | getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0))
+            out = []
+            for raw in p.stdout:
+                s = raw.decode('utf-8', 'replace'); self.q.put(('log', s))
+                m = re.search(r'-> (.+_merged_summary\.html)', s)
+                if m: out.append(m.group(1).strip())
+            p.wait(); self.q.put(('log', f'=== {group}：合併完成，{len(out)} 份報告 ===')); self.q.put(('merged', out))
+        self._bg(work)
 
     def _on_close(self):
         r = [i for i in self.jobs if self.running(i)]

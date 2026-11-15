@@ -4,14 +4,16 @@
   drop of n bets + a rise in one step (next spin started while the win was still counting up) -> split accordingly
 Coins that arrive while a popup was being dismissed (daily bonus, level-up gifts...) are reported separately, not as wins.
 
-usage:  python -m core.analyze <video.mp4> [--app lightning_link] [--fps 4]
+usage:  python -m core.analyze <video.mp4> [more.mp4 ...] [--app lightning_link] [--fps 4] [--merge]
+        python -m core.analyze --group <id> --app <app>     merge the videos of one multi-emulator run, per slot
 output: <video>_spins.tsv   one row per spin (time in video, bet, win, multiple, balance after)
         <video>_summary.json / _summary.html   RTP (+95% range), hit rate, win-size distribution, coins per hour, top wins
+        --merge / --group: <..>_merged_summary.html / .json / _spins.tsv = all spins of the same slot from several videos
 """
 import argparse, html, json, math, os, re, subprocess, sys, time
 import cv2
 import numpy as np
-from .config import TOOLS, ROOT
+from .config import TOOLS, ROOT, video_dir
 from .ocr import read_number
 
 _NOWIN = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -26,12 +28,35 @@ def wilson(k, n, z=1.96):
     c = (p + z * z / (2 * n)) / d; h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
     return (max(0.0, c - h), min(1.0, c + h))
 
-def boot_rtp(mult, n=2000, seed=1):
-    """95% range of RTP by resampling spins (win/bet multiples)"""
+def boot_rtp(mult, n=2000, seed=1, wins=None, bets=None):
+    """95% range of RTP by resampling spins (win/bet multiples). Mixed bets (merged videos): resample the ratio
+    total win / total bet instead, which is how that RTP is defined."""
     if len(mult) < 30: return (None, None)
     rng = np.random.default_rng(seed); m = np.asarray(mult, float)
-    means = np.array([m[rng.integers(0, len(m), len(m))].mean() for _ in range(n)])
+    if bets is not None:
+        w = np.asarray(wins, float); b = np.asarray(bets, float); means = []
+        for _ in range(n):
+            k = rng.integers(0, len(m), len(m)); means.append(w[k].sum() / b[k].sum())
+        means = np.array(means)
+    else: means = np.array([m[rng.integers(0, len(m), len(m))].mean() for _ in range(n)])
     return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
+
+BUCKETS = [(0, 0, '沒中'), (0, 1, '贏回不到 1 倍'), (1, 2, '1~2 倍'), (2, 5, '2~5 倍'), (5, 10, '5~10 倍'),
+           (10, 20, '10~20 倍'), (20, 50, '20~50 倍'), (50, 100, '50~100 倍'), (100, 1e18, '100 倍以上')]
+
+def spin_stats(wins, bets):
+    """RTP / hit rate / win-size distribution of a list of spins (one video, or several videos merged)"""
+    wins = np.asarray(wins, float); bets = np.asarray(bets, float); n = len(wins)
+    mult = wins / bets; tot_bet = float(bets.sum()); tot_win = float(wins.sum())
+    lo, hi = boot_rtp(mult, wins=wins, bets=bets) if len(np.unique(bets)) > 1 else boot_rtp(mult)
+    hits = int((wins > 0).sum()); hlo, hhi = wilson(hits, n)
+    dist = []
+    for lo_, hi_, label in BUCKETS:
+        sel = (mult == 0) if hi_ == 0 else ((mult > 0) & (mult < hi_)) if lo_ == 0 else ((mult >= lo_) & (mult < hi_))
+        k = int(sel.sum())
+        dist.append({'label': label, 'count': k, 'every_n': round(n / k, 1) if k else None, 'rtp_share': float(wins[sel].sum() / tot_bet)})
+    return {'spins': n, 'total_bet': tot_bet, 'total_win': tot_win, 'rtp': tot_win / tot_bet, 'rtp_95': [lo, hi],
+            'hit_rate': hits / n, 'hit_95': [hlo, hhi], 'hit_every_n': round(n / hits, 2) if hits else None, 'distribution': dist}, mult
 
 # ---------------- reading the video ----------------
 def video_size(path):
@@ -148,6 +173,18 @@ def build_spins(series, vals, bet, gift_windows, seg_bounds):
     return spins, gifts, jumps, odd
 
 def analyze(mp4, app_id=None, fps=4, say=print):
+    """analyse one video. A <video>.analyzing flag file exists while it runs (a merge waits for it instead of redoing it)."""
+    lock = mp4[:-4] + '.analyzing'
+    try:
+        with open(lock, 'w') as f: f.write(str(os.getpid()))
+    except OSError: lock = None
+    try: return _analyze(mp4, app_id, fps, say)
+    finally:
+        if lock:
+            try: os.remove(lock)
+            except OSError: pass
+
+def _analyze(mp4, app_id=None, fps=4, say=print):
     base = mp4[:-4]
     stats = {}
     if os.path.exists(base + '_stats.json'):
@@ -188,30 +225,21 @@ def analyze(mp4, app_id=None, fps=4, say=print):
     n = len(spins)
     if n == 0: raise SystemExit('no spins found')
 
-    wins = np.array([s['win'] for s in spins], float); mult = wins / bet
-    tot_bet = n * bet; tot_win = float(wins.sum()); rtp = tot_win / tot_bet
-    lo, hi = boot_rtp(mult)
-    hits = int((wins > 0).sum()); hlo, hhi = wilson(hits, n)
+    wins = np.array([s['win'] for s in spins], float)
+    core, mult = spin_stats(wins, [bet] * n)
+    tot_bet, tot_win, rtp = core['total_bet'], core['total_win'], core['rtp']; lo, hi = core['rtp_95']
     vid_s = stats.get('video_s') or (series[-1][0] if series else 0)
     off_s = sum(b - a for a, b, _ in (stats.get('timeline') or []))
     play_h = max(1e-6, (vid_s - off_s) / 3600)
-    buckets = [(0, 0, '沒中'), (0, 1, '贏回不到 1 倍'), (1, 2, '1~2 倍'), (2, 5, '2~5 倍'), (5, 10, '5~10 倍'),
-               (10, 20, '10~20 倍'), (20, 50, '20~50 倍'), (50, 100, '50~100 倍'), (100, 1e18, '100 倍以上')]
-    dist = []
-    for lo_, hi_, label in buckets:
-        sel = (mult == 0) if hi_ == 0 else ((mult > 0) & (mult < hi_)) if lo_ == 0 else ((mult >= lo_) & (mult < hi_))
-        k = int(sel.sum())
-        dist.append({'label': label, 'count': k, 'every_n': round(n / k, 1) if k else None,
-                     'rtp_share': float(wins[sel].sum() / tot_bet)})
     top = sorted(range(n), key=lambda i: -wins[i])[:10]
     summary = {
         'video': os.path.basename(mp4), 'app': prof['name'], 'slot': stats.get('name') or stats.get('slot'),
         'video_length': hms(vid_s), 'play_hours': round(play_h, 3), 'off_game': hms(off_s),
         'bet': bet, 'bet_check': {'from_balance_drops': bet_inf, 'drops_seen': n_inf, 'from_bet_meter': bet_ocr, 'recorder': stats.get('bet')},
         'spins': n, 'spins_per_hour': round(n / play_h), 'total_bet': tot_bet, 'total_win': tot_win,
-        'rtp': rtp, 'rtp_95': [lo, hi], 'hit_rate': hits / n, 'hit_95': [hlo, hhi], 'hit_every_n': round(n / hits, 2) if hits else None,
+        'rtp': rtp, 'rtp_95': [lo, hi], 'hit_rate': core['hit_rate'], 'hit_95': core['hit_95'], 'hit_every_n': core['hit_every_n'],
         'net_per_hour': (tot_win - tot_bet) / play_h, 'net_per_hour_in_bets': (tot_win - tot_bet) / bet / play_h,
-        'distribution': dist,
+        'distribution': core['distribution'], 'group': stats.get('group') or '', 'emulator': stats.get('emulator'),
         'top_wins': [{'time': hms(spins[i]['t']), 'win': float(wins[i]), 'x': float(mult[i])} for i in top if wins[i] > 0],
         'gifts': [{'time': hms(t), 'coins': c} for t, c in gifts], 'jumps': [{'time': hms(t), 'coins': c, 'why': w} for t, c, w in jumps],
         'multi_spin_steps': len(odd),
@@ -277,9 +305,170 @@ th{{background:#f3f3f3}}td:first-child,th:first-child{{text-align:left}}.big{{fo
 <li>關彈窗前後 12 秒內的加錢視為「贈送」，不算贏分（可能把少數真的贏分誤判成贈送，見上表）。</li></ul>
 <p style="color:#888">餘額讀取率 {s['meter_read_rate']:.0%}，分析耗時 {s['analysis_seconds']} 秒</p></html>"""
 
+# ---------------- several videos of the same slot (multi-emulator run) -> one report ----------------
+def _stats_of(mp4):
+    p = mp4[:-4] + '_stats.json'
+    if not os.path.exists(p): return {}
+    with open(p, encoding='utf-8') as f: return json.load(f)
+
+def _pid_alive(pid):
+    if os.name != 'nt': 
+        try: os.kill(pid, 0); return True
+        except OSError: return False
+    import ctypes
+    h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)          # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h: return False
+    code = ctypes.c_ulong(); ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code)); ctypes.windll.kernel32.CloseHandle(h)
+    return code.value == 259                                              # STILL_ACTIVE
+
+def _lock_alive(lock):
+    """a <video>.analyzing flag of an analysis that is still running (not one left behind by a crash)"""
+    try:
+        age = time.time() - os.path.getmtime(lock)
+        with open(lock) as f: pid = f.read().strip()
+    except OSError: return False
+    if pid.isdigit(): return _pid_alive(int(pid))
+    return age < 120                                                      # flag just created, pid not written yet
+
+def fresh_summary(mp4, app_id=None, say=print):
+    """the video's summary: reuse it if up to date, wait if its analysis is running right now, else analyse"""
+    base = mp4[:-4]; js = base + '_summary.json'; lock = base + '.analyzing'; told = False
+    while _lock_alive(lock):
+        if not told: say(f'waiting for the analysis already running on {os.path.basename(mp4)}'); told = True
+        time.sleep(10)
+    if os.path.exists(js) and os.path.exists(base + '_spins.tsv') and os.path.getmtime(js) >= os.path.getmtime(mp4):
+        with open(js, encoding='utf-8') as f: return json.load(f)
+    return analyze(mp4, app_id, say=say)
+
+def load_spins(base):
+    """[(time, bet, win)] from <base>_spins.tsv"""
+    out = []
+    with open(base + '_spins.tsv', encoding='utf-8') as f:
+        next(f, None)
+        for line in f:
+            p = line.rstrip('\n').split('\t')
+            if len(p) >= 5: out.append((p[1], float(p[3]), float(p[4])))
+    return out
+
+def merge(videos, out_base, app_id=None, say=print):
+    """all spins of the same slot from several videos (e.g. 3 emulators x 20 min) -> one report <out_base>_summary.html"""
+    parts = []
+    for v in videos:
+        try: s = fresh_summary(v, app_id, say)
+        except (SystemExit, Exception) as e: say(f'{os.path.basename(v)}: not used ({e!r})'); continue
+        parts.append((v, s, load_spins(v[:-4]), _stats_of(v)))
+    if not parts: raise SystemExit('none of the videos could be analysed')
+    wins = [w for _, _, rows, _ in parts for _, _, w in rows]; bets = [b for _, _, rows, _ in parts for _, b, _ in rows]
+    if not wins: raise SystemExit('no spins in these videos')
+    core, mult = spin_stats(wins, bets)
+    play_h = max(1e-6, sum(s['play_hours'] for _, s, _, _ in parts)); n = core['spins']
+    net = core['total_win'] - core['total_bet']; bet_set = sorted(set(bets)); mean_bet = core['total_bet'] / n
+    allsp = [(os.path.basename(v), t, b, w) for v, _, rows, _ in parts for t, b, w in rows]
+    top = sorted(range(n), key=lambda i: -mult[i])[:10]
+    first = parts[0][1]
+    summary = {
+        'merged': True, 'app': first['app'], 'group': first.get('group') or '',
+        'slot': next((s['slot'] for _, s, _, _ in parts if s.get('slot')), None) or re.sub(r'^\d{8}_\d{6}_|_merged$', '', os.path.basename(out_base)),
+        'videos': [{'video': os.path.basename(v), 'emulator': st.get('emulator', s.get('emulator')), 'video_length': s['video_length'],
+                    'play_hours': s['play_hours'], 'spins': s['spins'], 'rtp': s['rtp'], 'bet': s['bet'],
+                    'meter_read_rate': s['meter_read_rate'], 'balance_check': s.get('balance_check')} for v, s, _, st in parts],
+        'bet': bet_set[0] if len(bet_set) == 1 else None, 'bets': bet_set, 'play_hours': round(play_h, 3),
+        'video_hours': round(sum(st.get('video_s') or 0 for _, _, _, st in parts) / 3600, 3),
+        'spins_per_hour': round(n / play_h), **core,
+        'net_per_hour': net / play_h, 'net_per_hour_in_bets': net / mean_bet / play_h,
+        'top_wins': [{'video': allsp[i][0], 'time': allsp[i][1], 'win': allsp[i][3], 'x': float(mult[i])} for i in top if mult[i] > 0],
+        'gifts_total': sum(sum(g['coins'] for g in s.get('gifts', [])) for _, s, _, _ in parts),
+        'gifts_n': sum(len(s.get('gifts', [])) for _, s, _, _ in parts),
+        'meter_read_rate': min(s['meter_read_rate'] for _, s, _, _ in parts),
+    }
+    with open(out_base + '_spins.tsv', 'w', encoding='utf-8') as f:
+        f.write('spin\tvideo\ttime\tbet\twin\tx_bet\n')
+        for i, (vn, t, b, w) in enumerate(allsp, 1): f.write(f'{i}\t{vn}\t{t}\t{b:.0f}\t{w:.0f}\t{w / b:.2f}\n')
+    with open(out_base + '_summary.json', 'w', encoding='utf-8') as f: json.dump(summary, f, indent=1, ensure_ascii=False)
+    with open(out_base + '_summary.html', 'w', encoding='utf-8') as f: f.write(render_merged_html(summary))
+    lo, hi = core['rtp_95']
+    say(f"MERGED {len(parts)} videos, spins {n}  RTP {core['rtp']:.1%} ({lo and f'{lo:.0%}'}~{hi and f'{hi:.0%}'})  -> {out_base}_summary.html")
+    return summary
+
+def render_merged_html(s):
+    e = html.escape
+    pct = lambda x: '—' if x is None else f'{x:.1%}'
+    rows = ''.join(f"<tr><td>{e(d['label'])}</td><td>{d['count']:,}</td><td>{'每 %s 把' % d['every_n'] if d['every_n'] else '—'}</td>"
+                   f"<td>{d['rtp_share']:.1%}</td></tr>" for d in s['distribution'])
+    vids = ''.join(f"<tr><td>{e(v['video'])}</td><td>{e(str(v['emulator']))}</td><td>{v['video_length']}</td><td>{v['spins']:,}</td>"
+                   f"<td>{pct(v['rtp'])}</td><td>{fmt(v['bet'])}</td><td>{v['meter_read_rate']:.0%}</td></tr>" for v in s['videos'])
+    tops = ''.join(f"<tr><td>{e(t['video'])}</td><td>{t['time']}</td><td>{fmt(t['win'])}</td><td>{t['x']:,.1f} 倍</td></tr>" for t in s['top_wins'])
+    warn = []
+    if len(s['bets']) > 1: warn.append('各支影片的押注不同：' + '、'.join(fmt(b) for b in s['bets']) + '；RTP 以總贏分 ÷ 總押注計算，倍數分布以各自押注計算')
+    if s['meter_read_rate'] < 0.6: warn.append(f"有影片的餘額只讀到 {s['meter_read_rate']:.0%}，結果可能不完整")
+    if s['spins'] < 1000: warn.append(f"只有 {s['spins']:,} 把，RTP 範圍很寬，僅供參考")
+    w = ''.join(f'<li>{e(x)}</li>' for x in warn) or '<li>無</li>'
+    lo, hi = s['rtp_95']
+    bet_txt = fmt(s['bet']) if s['bet'] else '多種（見下表）'
+    return f"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><title>{e(str(s['slot']))} 合併統計</title>
+<style>body{{font-family:"Microsoft JhengHei",sans-serif;margin:24px;max-width:900px;color:#222}}
+table{{border-collapse:collapse;margin:8px 0 20px;page-break-inside:avoid}}td,th{{border:1px solid #ccc;padding:4px 10px;text-align:right}}
+th{{background:#f3f3f3}}td:first-child,th:first-child{{text-align:left}}.big{{font-size:22px;font-weight:bold}}</style>
+<h2>{e(s['app'])}｜{e(str(s['slot']))}（{len(s['videos'])} 支影片合併）</h2>
+<p>同一款遊戲由 {len(s['videos'])} 支影片（不同模擬器、各自的帳號）合計，影片共 {s['video_hours']:.2f} 小時，其中遊戲中 {s['play_hours']:.2f} 小時。</p>
+<table><tr><th>項目</th><th>數值</th><th>白話</th></tr>
+<tr><td>押注</td><td>{bet_txt}</td><td>每把</td></tr>
+<tr><td>遊戲局數</td><td>{s['spins']:,} 把</td><td>每台每小時約 {s['spins_per_hour']:,} 把</td></tr>
+<tr><td>實測 RTP（回收率）</td><td class=big>{pct(s['rtp'])}</td><td>95% 範圍 {pct(lo)} ~ {pct(hi)}；每押 100 拿回約 {s['rtp']*100:.0f}</td></tr>
+<tr><td>中獎率</td><td>{pct(s['hit_rate'])}</td><td>平均每 {s['hit_every_n']} 把中一次（95% 範圍 {pct(s['hit_95'][0])} ~ {pct(s['hit_95'][1])}）</td></tr>
+<tr><td>每小時輸贏（一台）</td><td>{fmt(s['net_per_hour'])}</td><td>約 {s['net_per_hour_in_bets']:,.0f} 注／小時</td></tr>
+<tr><td>總押注 / 總贏分</td><td>{fmt(s['total_bet'])} / {fmt(s['total_win'])}</td><td></td></tr>
+<tr><td>關彈窗時加的錢</td><td>{fmt(s['gifts_total'])}</td><td>{s['gifts_n']} 次，不算贏分</td></tr></table>
+<h3>各支影片</h3>
+<table><tr><th>影片</th><th>模擬器</th><th>長度</th><th>局數</th><th>RTP</th><th>押注</th><th>餘額讀取率</th></tr>{vids}</table>
+<h3>贏分大小分布（以押注倍數計）</h3>
+<table><tr><th>贏分</th><th>次數</th><th>頻率</th><th>佔 RTP</th></tr>{rows}</table>
+<h3>前 10 大獎（以押注倍數排序；哪支影片、影片時間）</h3>
+<table><tr><th>影片</th><th>影片時間</th><th>贏分</th><th>押注倍數</th></tr>{tops}</table>
+<h3>注意事項</h3><ul>{w}<li>單台的 RTP 會因帳號、時段不同而起伏；合併後局數較多，範圍較窄。</li>
+<li>每支影片各自的明細見同名的 _summary.html。</li></ul></html>"""
+
+def merge_group(group, app_id, say=print):
+    """every video of one multi-emulator run (stats.json group == id) -> one merged report per slot. -> [html paths]"""
+    vdir = video_dir(app_id); by_slot = {}
+    for f in sorted(os.listdir(vdir)):
+        if not f.endswith('_stats.json'): continue
+        try:
+            with open(os.path.join(vdir, f), encoding='utf-8') as fh: st = json.load(fh)
+        except (OSError, ValueError): continue
+        mp4 = os.path.join(vdir, f[:-len('_stats.json')] + '.mp4')
+        if st.get('group') == group and os.path.exists(mp4) and (st.get('video_s') or 0) >= 60:
+            by_slot.setdefault((st.get('slot'), st.get('name') or st.get('slot')), []).append(mp4)
+    out = []
+    for (slot, name), vids in by_slot.items():
+        say(f'--- {name}: {len(vids)} video(s) ---')
+        try:
+            merge(vids, os.path.join(vdir, f'{group}_{name}_merged'), app_id, say)
+            out.append(os.path.join(vdir, f'{group}_{name}_merged_summary.html'))
+        except SystemExit as e: say(f'{name}: {e}')
+        except Exception as e: say(f'{name}: merge failed {e!r}')            # one bad slot must not stop the others
+    if not by_slot: say(f'no videos of group {group} in {vdir}')
+    return out
+
 if __name__ == '__main__':
-    ap = argparse.ArgumentParser(); ap.add_argument('videos', nargs='+'); ap.add_argument('--app'); ap.add_argument('--fps', type=float, default=4)
+    ap = argparse.ArgumentParser(); ap.add_argument('videos', nargs='*'); ap.add_argument('--app'); ap.add_argument('--fps', type=float, default=4)
+    ap.add_argument('--merge', action='store_true', help='videos of the same slot -> also one merged report')
+    ap.add_argument('--group', help='merge every video of this multi-emulator run (needs --app)')
     a = ap.parse_args()
+    if a.group:
+        if not a.app: raise SystemExit('--group needs --app')
+        merge_group(a.group, a.app); sys.exit(0)
     for v in a.videos:
         try: analyze(v, a.app, a.fps)
         except SystemExit as e: print(v, '->', e)
+    if a.merge and len(a.videos) > 1:
+        by_slot = {}
+        for v in a.videos:
+            st = _stats_of(v)                                   # old videos have no stats -> same name in the file = same slot
+            key = st.get('name') or re.sub(r'^\d{8}_\d{6}_|(_PARTIAL|_e\d+)+$', '', os.path.basename(v)[:-4])
+            by_slot.setdefault(key, []).append(v)
+        for slot, vids in by_slot.items():
+            if len(vids) < 2: continue
+            name = slot
+            try: merge(vids, os.path.join(os.path.dirname(os.path.abspath(vids[0])), f'{time.strftime("%Y%m%d_%H%M%S")}_{name}_merged'), a.app)
+            except SystemExit as e: print(name, '->', e)
