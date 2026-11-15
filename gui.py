@@ -14,10 +14,11 @@ from core.version import VERSION
 
 STOP_ALL = d.STOP_ALL
 MAX_MULTI = 6                       # 同時用 N 台: upper limit of the spinbox
+STARTUP_LNK = os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'SlotRecorder.lnk')
 LOG_DIR = os.path.join(ROOT, 'logs'); os.makedirs(LOG_DIR, exist_ok=True)
 NOWIN = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 PY = sys.executable.replace('pythonw.exe', 'python.exe')
-STATE_ZH = {'entering': '進入 slot', 'game': '遊戲中', 'popup': '關彈窗中', 'stuck': '卡住處理中', 'lobby': '回大廳重進',
+STATE_ZH = {'paytable': '截賠率表', 'entering': '進入 slot', 'game': '遊戲中', 'popup': '關彈窗中', 'stuck': '卡住處理中', 'lobby': '回大廳重進',
             'reset': '金幣用完→重置帳號', 'finishing': '收尾合併影片'}
 
 def slugify(s):
@@ -35,6 +36,7 @@ class Gui(tk.Tk):
         self.groups = {}                                                    # multi-emulator run id -> {'app', 'idxs', 'merged'}
         self.devlock = threading.Lock()
         self._build(); self.after(150, self._poll); self.after(1000, self._tick)
+        self.after(2000, self._check_interrupted)
         self.protocol('WM_DELETE_WINDOW', self._on_close)
 
     # ---------------- layout ----------------
@@ -62,6 +64,7 @@ class Gui(tk.Tk):
         ttk.Entry(flt, textvariable=self.q_var, width=22).pack(side='left')
         self.only_on = tk.BooleanVar(value=False)
         ttk.Checkbutton(flt, text='只看已勾選', variable=self.only_on, command=self._filter).pack(side='left', padx=6)
+        ttk.Button(flt, text='勾選樣本不足', command=self._pick_low).pack(side='left')
         self.count_lbl = ttk.Label(flt, text='', foreground='#555'); self.count_lbl.pack(side='right')
         tf = ttk.Frame(left); tf.pack(fill='both', expand=True)
         self.tree = ttk.Treeview(tf, columns=('on', 'name', 'min', 'id'), show='headings', height=12)
@@ -76,6 +79,7 @@ class Gui(tk.Tk):
         self.btn_del = ttk.Button(bt, text='刪除', command=self._del_slot); self.btn_del.pack(side='left', padx=4)
         self.btn_test = ttk.Button(bt, text='測試尋找', command=self._test_find); self.btn_test.pack(side='left')
         self.btn_scan = ttk.Button(bt, text='🔍 掃描大廳找新遊戲', command=self._scan_catalog); self.btn_scan.pack(side='left', padx=4)
+        ttk.Button(bt, text='📖 賠率表', command=self._paytable).pack(side='left')
         bt2 = ttk.LabelFrame(left, text='卡在新彈窗？把它的 X / 按鈕加成範本（錄製中也可以加，馬上生效）', padding=4); bt2.pack(fill='x', pady=4)
         ttk.Button(bt2, text='＋ 從目前畫面框選', command=lambda: self._add_tpl(False)).pack(side='left')
         ttk.Button(bt2, text='＋ 從截圖檔框選', command=lambda: self._add_tpl(True)).pack(side='left', padx=4)
@@ -93,6 +97,7 @@ class Gui(tk.Tk):
         ttk.Button(run, text='■ 全部停止', command=self._stop_all).pack(side='left')
         ttk.Button(run, text='開啟影片資料夾', command=self._open_videos).pack(side='right')
         ttk.Button(run, text='📊 分析影片', command=self._analyze).pack(side='right', padx=4)
+        ttk.Button(run, text='📋 總覽', command=self._overview).pack(side='right')
         ttk.Label(right, text='錄製工作（每台模擬器一列；選一列再按「停止此台」）').pack(anchor='w', pady=(8, 0))
         cols = (('emu', '模擬器', 110), ('app', 'App', 110), ('cur', '目前', 210), ('prog', '進度', 60), ('state', '狀態', 130),
                 ('pop', '彈窗', 50), ('off', '非遊戲', 60), ('note', '備註', 160))
@@ -256,6 +261,74 @@ class Gui(tk.Tk):
             self.q.put(('emus', None))
         self._on_dev(idx, work)
 
+    def _set_startup(self, on):
+        """shortcut to run.bat in the user's Startup folder (no admin rights needed)"""
+        try:
+            if not on:
+                os.remove(STARTUP_LNK); self.log('已取消開機自動開啟'); return
+            ps = ('$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:SR_LNK); $s.TargetPath=$env:SR_TARGET; '
+                  '$s.WorkingDirectory=$env:SR_DIR; $s.WindowStyle=7; $s.Description="SlotRecorder"; $s.Save()')
+            subprocess.run(['powershell', '-NoProfile', '-Command', ps], creationflags=NOWIN, timeout=60,
+                           env=dict(os.environ, SR_LNK=STARTUP_LNK, SR_TARGET=os.path.join(ROOT, 'run.bat'), SR_DIR=ROOT))
+            self.log('✔ 已設定開機登入後自動開啟 SlotRecorder' if os.path.exists(STARTUP_LNK) else '✘ 設定開機自動開啟失敗')
+        except Exception as e: self.log(f'設定開機自動開啟失敗：{e!r}')
+
+    # ---------------- crash / reboot: resume jobs that were cut off ----------------
+    def _interrupted(self):
+        """jobs whose batch process vanished without writing why it ended (= GUI / PC crash, reboot)"""
+        out = []
+        for f in sorted(os.listdir(LOG_DIR)):
+            m = re.fullmatch(r'last_job_e(\d+)\.json', f)
+            if not m: continue
+            idx = int(m.group(1))
+            try:
+                with open(os.path.join(LOG_DIR, f), encoding='utf-8') as fh: j = json.load(fh)
+                jp = os.path.join(LOG_DIR, f'job_{j["job"]}.json')
+                with open(jp, encoding='utf-8') as fh: st = json.load(fh)
+            except (OSError, ValueError, KeyError): continue
+            if 'pid' not in st or st.get('finished') or self.running(idx): continue
+            if os.path.exists(d.stop_file(idx)) or os.path.exists(STOP_ALL): continue      # user pressed stop, PC went down first
+            try: started = time.mktime(time.strptime(st.get('started', ''), '%Y-%m-%d %H:%M:%S'))
+            except ValueError: started = 0
+            if started >= d.boot_time() and d.pid_alive(st['pid']): continue              # still running (pid not reused)
+            left = [s for s in j['slots'] if st.get('status', {}).get(s, {}).get('result') != 'done']
+            if left: out.append((idx, j, jp, left))
+        return out
+    def _check_interrupted(self):
+        try: todo = self._interrupted()
+        except Exception as e: self.log(f'檢查中斷的工作失敗：{e!r}'); return
+        if not todo: return
+        lines = [f'模擬器 {self.emu_name(i)}：{dict(self.apps).get(j["app"], j["app"])}，還有 {len(left)} 款沒錄完'
+                 + (f'（{j.get("split")} 台同時錄製之一）' if j.get('group') else '') for i, j, _, left in todo]
+        self.log('發現被中斷的錄製工作（當機或重開機）：\n  ' + '\n  '.join(lines))
+        win = tk.Toplevel(self); win.title('接續中斷的錄製'); win.attributes('-topmost', True)
+        ttk.Label(win, text='上次的錄製被中斷了（當機或重開機）：\n\n' + '\n'.join(lines) + '\n\n已錄完的遊戲會跳過。', padding=12).pack()
+        cd = ttk.Label(win, padding=(12, 0)); cd.pack()
+        state = {'left': 60, 'done': False}
+        def go():
+            if state['done']: return
+            state['done'] = True; win.destroy()
+            for i, j, _, _ in todo:
+                self.log(f'--- 自動接續 {j["job"]}（模擬器 {self.emu_name(i)}）---')
+                self._launch(i, j['app'], j['slots'], j['job'], int(j.get('split') or 1), j.get('group') or '')
+        def cancel():
+            state['done'] = True; win.destroy()
+            for _, _, jp, _ in todo:                        # do not ask again (↻ 接續上次 still works)
+                try:
+                    with open(jp, encoding='utf-8') as fh: st = json.load(fh)
+                    st['finished'] = 'dismissed'
+                    with open(jp, 'w', encoding='utf-8') as fh: json.dump(st, fh, indent=1, ensure_ascii=False)
+                except (OSError, ValueError): pass
+            self.log('已取消自動接續（之後仍可按「↻ 接續上次」）')
+        def tick():
+            if state['done']: return
+            if state['left'] <= 0: go(); return
+            cd['text'] = f'{state["left"]} 秒後自動接續'; state['left'] -= 1; self.after(1000, tick)
+        bb = ttk.Frame(win, padding=12); bb.pack()
+        ttk.Button(bb, text='立即接續', command=go).pack(side='left', padx=4)
+        ttk.Button(bb, text='取消（這次不接續）', command=cancel).pack(side='left', padx=4)
+        win.protocol('WM_DELETE_WINDOW', cancel); tick()
+
     def _preview(self):
         def work(): self.q.put(('preview', d.grab()))
         self._on_dev(self.emu(), work)
@@ -272,7 +345,8 @@ class Gui(tk.Tk):
         win = tk.Toplevel(self); win.title('設定'); win.grab_set()
         fields = [('ldplayer_dir', 'LDPlayer 資料夾（含 ldconsole.exe）'), ('ld_index', '主要模擬器編號（多開器裡的 index）'),
                   ('serial', '主要模擬器 adb 序號'), ('video_dir', '影片輸出資料夾'), ('spin_interval', 'Spin 間隔（秒）'),
-                  ('adb', 'adb.exe（空白=自動）'), ('scrcpy', 'scrcpy.exe（空白=自動）'), ('ffmpeg', 'ffmpeg.exe（空白=自動）')]
+                  ('adb', 'adb.exe（空白=自動）'), ('scrcpy', 'scrcpy.exe（空白=自動）'), ('ffmpeg', 'ffmpeg.exe（空白=自動）'),
+                  ('target_spins', '每款目標局數（總覽 / 勾選樣本不足用，預設 1000）')]
         vars_ = {}
         for i, (k, label) in enumerate(fields):
             ttk.Label(win, text=label).grid(row=i, column=0, sticky='w', padx=8, pady=3)
@@ -283,17 +357,24 @@ class Gui(tk.Tk):
         ni = tk.BooleanVar(value=bool(cfg.get('new_instance_reset', True)))
         ttk.Checkbutton(win, text='88F 這類換不了帳號的 app 沒錢時：自動建一台全新模擬器接著錄（約 15 分鐘；不勾 = 停止錄影）',
                         variable=ni).grid(row=len(fields) + 1, column=1, sticky='w', padx=8)
+        su = tk.BooleanVar(value=os.path.exists(STARTUP_LNK))
+        ttk.Checkbutton(win, text='開機登入 Windows 後自動開啟 SlotRecorder（當機 / 重開機中斷的錄影會自動接續）',
+                        variable=su).grid(row=len(fields) + 2, column=1, sticky='w', padx=8)
         def ok():
+            if su.get() != os.path.exists(STARTUP_LNK): self._set_startup(su.get())
             new = dict(cfg)
             for k, v in vars_.items():
                 val = v.get().strip()
                 try:
                     if k == 'ld_index': val = int(val)
+                    elif k == 'target_spins':
+                        val = int(val or 1000)
+                        if not 100 <= val <= 100000: raise ValueError
                     elif k == 'spin_interval':
                         val = float(val)
                         if not 0.3 <= val <= 10: raise ValueError
                 except ValueError:
-                    messagebox.showwarning('設定', f'「{dict(fields)[k]}」需要是數字（Spin 間隔 0.3~10 秒）', parent=win); return
+                    messagebox.showwarning('設定', f'「{dict(fields)[k]}」需要是數字（Spin 間隔 0.3~10 秒；目標局數 100~100000）', parent=win); return
                 if k in ('ldplayer_dir', 'serial') and not val:
                     messagebox.showwarning('設定', f'「{dict(fields)[k]}」不能空白', parent=win); return
                 new[k] = val
@@ -623,6 +704,69 @@ class Gui(tk.Tk):
                 h = f[:-4] + '_summary.html'
                 if os.path.exists(h) and os.path.getmtime(h) > time.time() - 3600: os.startfile(h)
         self._bg(work)
+    def _paytable(self):
+        """selected game's paytable screenshots: open them, or (re)take them on the selected emulator"""
+        a = self.app(); sel = self.tree.selection()
+        if not a or not sel: messagebox.showinfo('賠率表', '先在清單點選一款遊戲', parent=self); return
+        sid = sel[0]; name = self.tree.set(sid, 'name')
+        from core import paytable as pt
+        folder = pt.out_dir(a, sid)
+        if pt.has(a, sid):
+            n = len([f for f in os.listdir(folder) if f.endswith('.jpg')])
+            r = messagebox.askyesnocancel('賠率表', f'{name} 已截過 {n} 頁。\n\n是 = 開啟資料夾\n否 = 重新截（會進遊戲重拍）', parent=self)
+            if r is None: return
+            if r: os.startfile(folder); return
+        if not a.p.get('paytable'): messagebox.showinfo('賠率表', f'{a.p["name"]} 還沒設定賠率表按鈕', parent=self); return
+        if self._busy(): return
+        idx = self.emu(); self.log(f'--- 截賠率表：{name}（模擬器 {self.emu_name(idx)}，先進遊戲，約 2~4 分鐘）---')
+        def work():
+            if not d.ensure_running(): print('✘ 模擬器開不起來'); return
+            if not a.enter_slot(sid): print('✘ 進不了這款遊戲'); return
+            n = pt.capture(a, sid, force=True, say=print)
+            print(f'✔ 賠率表 {n} 頁 → {folder}' if n else '✘ 沒截到賠率表（看上面的訊息）')
+            if n: os.startfile(folder)
+        self._on_dev(idx, work)
+    def _overview(self):
+        """rebuild 總覽.html + Excel of every app and open it"""
+        self.log('--- 更新總覽（所有 app，含 Excel / PDF）---')
+        def work():
+            say = lambda s: self.q.put(('log', s))
+            try:
+                from core import overview
+                h = overview.build(say=say); os.startfile(h)
+            except Exception as e: say(f'總覽失敗：{e!r}')
+        self._bg(work)
+    def _pick_low(self):
+        """tick the games of this app that were recorded but have fewer spins than the target; minutes = estimate to reach it"""
+        a = self.app()
+        if not a or self._locked(): return
+        self.log('計算各款已錄局數…')
+        def work():
+            try:
+                from core import overview
+                overview.build([a.id], excel=False, say=lambda s: None)
+                with open(os.path.join(overview.videos_root(), 'overview.json'), encoding='utf-8') as f: data = json.load(f)
+                self.q.put(('lowpick', a.id, data))
+            except Exception as e: self.q.put(('log', f'計算失敗：{e!r}'))
+        self._bg(work)
+    def _apply_low(self, app_id, data):
+        a = self.app()
+        if not a or a.id != app_id: return
+        games = data['apps'].get(app_id, {}); target = data.get('target', 1000)
+        low = {k: g for k, g in games.items() if g['need'] > 0 and k in self._all_ids and self.tree.exists(k)}
+        if not low:
+            messagebox.showinfo('勾選樣本不足', f'已錄過的遊戲都達到 {target:,} 局了（沒錄過的不算）。', parent=self); return
+        mins = {k: min(600, max(10, -(-(g['est_minutes'] or 60) // 10) * 10)) for k, g in low.items()}
+        txt = '\n'.join(f'{g["name"]}：{g["spins"]:,} 局，差 {g["need"]:,} 局 → 錄 {mins[k]} 分鐘' for k, g in list(low.items())[:15])
+        if len(low) > 15: txt += f'\n…共 {len(low)} 款'
+        if not messagebox.askyesno('勾選樣本不足', f'目標每款 {target:,} 局。要勾選這 {len(low)} 款並設定補錄分鐘數嗎？\n'
+                                   f'（其他遊戲會取消勾選；分鐘數依目前每小時局數估算）\n\n{txt}', parent=self): return
+        for i in self._all_ids:
+            if not self.tree.exists(i): continue
+            self.tree.set(i, 'on', '✓' if i in low else '')
+            if i in low: self.tree.set(i, 'min', mins[i])
+        self._save_tree(); self.only_on.set(True); self._filter()
+        self.log(f'已勾選 {len(low)} 款樣本不足的遊戲，按 ▶ 開始錄製即可補錄（可配合「同時用 N 台」）')
     def _pack(self):
         self.log('--- 打包中（不含影片、log、本機設定）---')
         def work():
@@ -673,6 +817,7 @@ class Gui(tk.Tk):
                 elif kind == 'crop': self._crop_dialog(item[1])
                 elif kind == 'tpl': self._tpl_dialog(item[1])
                 elif kind == 'emus': self._load_emus()
+                elif kind == 'lowpick': self._apply_low(item[1], item[2])
                 elif kind == 'multi_go':
                     _, group, app_id, ids, got, n = item
                     for i in got: self._launch(i, app_id, ids, f'{group}_e{i}', n, group)

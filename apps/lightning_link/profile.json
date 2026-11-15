@@ -167,5 +167,10 @@
         702
       ]
     }
+  },
+  "paytable": {
+    "open": [
+      "btn_info_ingame"
+    ]
   }
 }

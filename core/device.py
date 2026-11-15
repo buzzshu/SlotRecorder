@@ -221,6 +221,26 @@ def copy_app(pkg, src_serial, dst_serial, say=log):
         shutil.rmtree(tmp, ignore_errors=True)
 
 # ---------------- PC resources ----------------
+def boot_time():
+    """epoch seconds when Windows started (a process recorded before that cannot still be running)"""
+    try:
+        k = ctypes.windll.kernel32; k.GetTickCount64.restype = ctypes.c_ulonglong
+        return time.time() - k.GetTickCount64() / 1000
+    except Exception: return 0
+
+def pid_alive(pid):
+    """is process <pid> still running? (Windows: OpenProcess + GetExitCodeProcess == STILL_ACTIVE)"""
+    try: pid = int(pid)
+    except (TypeError, ValueError): return False
+    if os.name != 'nt':
+        try: os.kill(pid, 0); return True
+        except OSError: return False
+    k = ctypes.windll.kernel32
+    h = k.OpenProcess(0x1000, False, pid)                                  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h: return False
+    code = ctypes.c_ulong(); k.GetExitCodeProcess(h, ctypes.byref(code)); k.CloseHandle(h)
+    return code.value == 259
+
 def free_ram_gb():
     class MS(ctypes.Structure):
         _fields_ = [('dwLength', ctypes.c_ulong), ('dwMemoryLoad', ctypes.c_ulong), ('ullTotalPhys', ctypes.c_ulonglong),

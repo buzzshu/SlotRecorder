@@ -13,7 +13,7 @@ output: <video>_spins.tsv   one row per spin (time in video, bet, win, multiple,
 import argparse, html, json, math, os, re, subprocess, sys, time
 import cv2
 import numpy as np
-from .config import TOOLS, ROOT, video_dir
+from .config import CFG, TOOLS, ROOT, video_dir
 from .ocr import read_number
 
 _NOWIN = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -254,9 +254,18 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
             f.write(f"{i}\t{hms(s['t'])}\t{s['t']:.1f}\t{s['bet']}\t{s['win']:.0f}\t{s['win'] / bet:.2f}\t{s['bal']}\n")
     with open(base + '_summary.json', 'w', encoding='utf-8') as f: json.dump(summary, f, indent=1, ensure_ascii=False)
     with open(base + '_summary.html', 'w', encoding='utf-8') as f: f.write(render_html(summary))
+    _pdf(base + '_summary.html', say)
     say(f'spins {n}  RTP {rtp:.1%} ({lo and f"{lo:.0%}"}~{hi and f"{hi:.0%}"})  hit 1/{summary["hit_every_n"]}  '
         f'bet {bet:,}  read {read_ok:.0%}  -> {os.path.basename(base)}_summary.html')
     return summary
+
+def _pdf(html_path, say):
+    """PDF copy of a report (headless Edge / Chrome); never fails the analysis"""
+    if not CFG.get('auto_pdf', True): return
+    try:
+        from .overview import to_pdf
+        to_pdf(html_path, say)
+    except Exception as e: say(f'PDF not made: {e!r}')
 
 def fmt(v):
     if v is None: return '—'
@@ -386,6 +395,7 @@ def merge(videos, out_base, app_id=None, say=print):
         for i, (vn, t, b, w) in enumerate(allsp, 1): f.write(f'{i}\t{vn}\t{t}\t{b:.0f}\t{w:.0f}\t{w / b:.2f}\n')
     with open(out_base + '_summary.json', 'w', encoding='utf-8') as f: json.dump(summary, f, indent=1, ensure_ascii=False)
     with open(out_base + '_summary.html', 'w', encoding='utf-8') as f: f.write(render_merged_html(summary))
+    _pdf(out_base + '_summary.html', say)
     lo, hi = core['rtp_95']
     say(f"MERGED {len(parts)} videos, spins {n}  RTP {core['rtp']:.1%} ({lo and f'{lo:.0%}'}~{hi and f'{hi:.0%}'})  -> {out_base}_summary.html")
     return summary
@@ -457,7 +467,9 @@ if __name__ == '__main__':
     a = ap.parse_args()
     if a.group:
         if not a.app: raise SystemExit('--group needs --app')
-        merge_group(a.group, a.app); sys.exit(0)
+        merge_group(a.group, a.app)
+        from .overview import safe_build
+        safe_build([a.app]); sys.exit(0)
     for v in a.videos:
         try: analyze(v, a.app, a.fps)
         except SystemExit as e: print(v, '->', e)
@@ -472,3 +484,6 @@ if __name__ == '__main__':
             name = slot
             try: merge(vids, os.path.join(os.path.dirname(os.path.abspath(vids[0])), f'{time.strftime("%Y%m%d_%H%M%S")}_{name}_merged'), a.app)
             except SystemExit as e: print(name, '->', e)
+    if a.videos:
+        from .overview import safe_build
+        safe_build([a.app] if a.app else None)                 # 總覽 / Excel follow every new analysis

@@ -32,7 +32,23 @@ def main():
     d._LOGFILE = os.environ['SLOTREC_LOG']
     if os.path.exists(d.stop_file()):
         d.log('STOP file present from an earlier run -> removed'); os.remove(d.stop_file())
-    sys.exit(run(a.app, [s for s in a.slots.split(',') if s], a.job, LOG_DIR, a.minutes, max(1, a.split), a.group))
+    res = {'reason': 'error'}                                # why the job ended -> GUI auto-resume only after a crash / reboot
+    try:
+        rc = run(a.app, [s for s in a.slots.split(',') if s], a.job, LOG_DIR, a.minutes, max(1, a.split), a.group, res)
+    except d.StopRequested:
+        res['reason'] = 'stopped'; rc = 2
+    finally:
+        mark_finished(os.path.join(LOG_DIR, f'job_{a.job}.json'), res['reason'])
+    sys.exit(rc)
+
+def mark_finished(jp, reason):
+    """job json 'finished' = done / stopped / failed / error. A job json WITHOUT it (but with 'pid') whose process is gone
+    was cut off by a crash or a reboot -> the GUI offers to resume it."""
+    try:
+        with open(jp, encoding='utf-8') as f: st = json.load(f)
+        st['finished'] = reason; st['finished_at'] = time.strftime('%F %T')
+        with open(jp, 'w', encoding='utf-8') as f: json.dump(st, f, indent=1, ensure_ascii=False)
+    except (OSError, ValueError): pass
 
 def ensure_app(app, say):
     """a fresh emulator (GUI multi-run creates SR_ ones) has no app yet -> install it from apk_cache, which is filled
@@ -55,7 +71,7 @@ def ensure_app(app, say):
     if not app.to_lobby(max_steps=80, restart_ok=False): say('lobby not reached yet -> the recorder keeps trying')
     return True
 
-def run(app_id, slot_ids, job, log_dir, minutes=None, split=1, group=''):
+def run(app_id, slot_ids, job, log_dir, minutes=None, split=1, group='', res=None):
     from .app import App
     from . import device as d
     from .device import log
@@ -63,16 +79,18 @@ def run(app_id, slot_ids, job, log_dir, minutes=None, split=1, group=''):
     jp = os.path.join(log_dir, f'job_{job}.json')
     st = json.load(open(jp, encoding='utf-8')) if os.path.exists(jp) else {'app': app_id, 'slots': slot_ids, 'status': {}}
     st['emulator'] = d.IDX; st['split'] = split; st['group'] = group
+    st['pid'] = os.getpid(); st['finished'] = None; st['started'] = time.strftime('%F %T')     # running (see mark_finished)
+    res = res if res is not None else {}
     sw = os.path.join(log_dir, f'job_{job}.emu'); os.environ['SLOTREC_SWITCH_FILE'] = sw   # record writes a new emulator index here
     def save(): json.dump(st, open(jp, 'w', encoding='utf-8'), indent=1, ensure_ascii=False)
     from .version import VERSION
     save(); log(f'JOB {job}: {len(slot_ids)} slot(s) on emulator {d.IDX} ({d.SER})  SlotRecorder v{VERSION}'
                 + (f'  [group {group}: 1 of {split} emulators, each records 1/{split} of the minutes]' if group else ''))
     try:
-        if not d.ensure_running(timeout=360): log('emulator not available -> job stops'); return 2
-        if not ensure_app(app, log): log('app could not be installed -> job stops'); return 2
+        if not d.ensure_running(timeout=360): log('emulator not available -> job stops'); res['reason'] = 'failed'; return 2
+        if not ensure_app(app, log): log('app could not be installed -> job stops'); res['reason'] = 'failed'; return 2
     except d.StopRequested:
-        log('STOP requested during setup'); return 2
+        log('STOP requested during setup'); res['reason'] = 'stopped'; return 2
     for i, sid in enumerate(slot_ids, 1):
         if d.stop_requested(): log('STOP requested -> batch stops'); break
         if st['status'].get(sid, {}).get('result') == 'done': log(f'skip {sid} (already done)'); continue
@@ -89,12 +107,13 @@ def run(app_id, slot_ids, job, log_dir, minutes=None, split=1, group=''):
             if new.isdigit():
                 os.environ['SLOTREC_LD_INDEX'] = new; d.use(int(new)); st['emulator'] = int(new); log(f'next slots use emulator {new}')
         save()
-    res = {k: v['result'] for k, v in st['status'].items()}
-    log('JOB FINISHED', res)
+    out = {k: v['result'] for k, v in st['status'].items()}
+    log('JOB FINISHED', out)
+    res['reason'] = 'done' if all(out.get(s) == 'done' for s in slot_ids) else ('stopped' if d.stop_requested() else 'failed')
     name = next((n for i, n, _ in d.instances() if i == d.IDX), '')
     if group and name.startswith(d.SR_PREFIX):                # helper emulator of a multi-run: shut it down (kept for next time)
         log(f'shut down helper emulator {d.IDX} {name}'); d.ld('quit', '--index', str(d.IDX))
-    return 0 if all(res.get(s) == 'done' for s in slot_ids) else 2
+    return 0 if all(out.get(s) == 'done' for s in slot_ids) else 2
 
 if __name__ == '__main__':
     main()

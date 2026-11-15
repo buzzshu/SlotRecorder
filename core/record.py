@@ -115,6 +115,12 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                     app.restart()
                     if not app.enter_slot(slot_id): log('cannot enter slot'); return 2
         st['bet'] = app.min_bet()
+        if p.get('paytable') and CFG.get('capture_paytable', True):    # once per game: paytable / rules screenshots
+            try:
+                from .paytable import capture, has
+                if not has(app, slot_id): log('STATUS paytable'); capture(app, slot_id, say=log)
+            except StopRequested: raise
+            except Exception as e: log('paytable capture failed', repr(e))
     except StopRequested:
         log('STOP requested before recording started'); return 2
 
@@ -348,7 +354,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
             except Exception as e: log('timeline / clean cut failed', repr(e))
         with open(base + '_stats.json', 'w', encoding='utf-8') as f: json.dump(st, f, indent=1, ensure_ascii=False)
         log('done', 'OK' if ok else 'INCOMPLETE', f"video {st.get('video_s', 0)}s ->", mp4)
-        if os.path.exists(mp4) and st.get('video_s', 0) >= 120 and CFG.get('auto_analyze', True):
+        if os.path.exists(mp4) and st.get('video_s', 0) >= 60 and CFG.get('auto_analyze', True):
             flag = base + '.analyzing'                  # set BEFORE the spawn: a merge must not start the same analysis
             try:                                        # statistics in the background, low priority; next slot starts now
                 open(flag, 'w').close()
@@ -360,6 +366,13 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                 log('could not start analysis', repr(e))
                 try: os.remove(flag)
                 except OSError: pass
+        try:                                            # recognition pipelines (SpookyLink ...) get their copy
+            from .exports import wanted
+            if os.path.exists(mp4) and st.get('video_s', 0) >= 60 and wanted(app_id, slot_id):
+                subprocess.Popen([sys.executable, '-m', 'core.exports', mp4], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 creationflags=_NOWIN | getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0))
+                log('export to recognition pipeline started in background')
+        except Exception as e: log('could not start export', repr(e))
     return 0 if ok else 2
 
 def removable(row):

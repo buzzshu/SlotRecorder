@@ -189,5 +189,18 @@
         712
       ]
     }
+  },
+  "paytable": {
+    "open": [
+      [
+        "btn_menu_ingame",
+        "btn_menu_ingame_land"
+      ],
+      [
+        "btn_info_ingame",
+        "btn_info_ingame_land"
+      ]
+    ],
+    "step_wait": 1.0
   }
 }
