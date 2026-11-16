@@ -66,7 +66,8 @@ def _capture(app, out, cfg, force, say, max_pages):
             return None
         d.tap(*c); tapped.append(c); time.sleep(cfg.get('step_wait', 1.0)); im = d.grab()
     time.sleep(cfg.get('open_wait', 2.5)); first = d.grab()
-    if not _find_word(first, NEXT_WORDS):                      # paytable pages always have NEXT; anything else = not opened
+    opened_tpl = cfg.get('opened_tpl')                         # pages without a NEXT button (swiped): a template proves it
+    if not _find_word(first, NEXT_WORDS) and not (opened_tpl and app.t.find(first, opened_tpl, 0.8)[1]):
         say('paytable: info pages did not open')
         if not app.in_game(first): d.back(); time.sleep(2)
         return None
@@ -75,15 +76,20 @@ def _capture(app, out, cfg, force, say, max_pages):
     pages = [first]; cv2.imwrite(os.path.join(out, '01.jpg'), first, [cv2.IMWRITE_JPEG_QUALITY, 92])
     im = first
     for _ in range(max_pages - 1):
-        c = _find_word(im, NEXT_WORDS)
-        if not c: break                                        # single page / no NEXT button
-        d.tap(*c); time.sleep(cfg.get('page_wait', 2.0)); im = d.grab()
+        sw = cfg.get('next_swipe_land') if (im.shape[1] > im.shape[0] and cfg.get('next_swipe_land')) else cfg.get('next_swipe')
+        if sw: d.swipe(*sw)                                    # 包你發: page dots, swipe left (orientation-specific)
+        else:
+            c = _find_word(im, NEXT_WORDS)
+            if not c: break                                    # single page / no NEXT button
+            d.tap(*c)
+        time.sleep(cfg.get('page_wait', 2.0)); im = d.grab()
         if _diff(im, first) < 4: break                         # wrapped around to page 1
         if _diff(im, pages[-1]) < 1.5:                         # NEXT did nothing: last page
             time.sleep(1.5); im = d.grab()
             if _diff(im, pages[-1]) < 1.5: break
         pages.append(im); cv2.imwrite(os.path.join(out, f'{len(pages):02d}.jpg'), im, [cv2.IMWRITE_JPEG_QUALITY, 92])
-    c = _find_word(im, CLOSE_WORDS)
+    c = app.t.find(im, cfg['close_tpl'], 0.8)[1] if cfg.get('close_tpl') else None
+    c = c or _find_word(im, CLOSE_WORDS)
     if c: d.tap(*c)
     else: d.back()
     time.sleep(2.5)

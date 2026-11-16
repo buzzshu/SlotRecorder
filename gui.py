@@ -183,8 +183,8 @@ class Gui(tk.Tk):
             v = simpledialog.askinteger('分鐘', '錄幾分鐘？', initialvalue=int(float(self.tree.set(iid, 'min') or 60)), minvalue=1, maxvalue=600, parent=self)
             if v: self.tree.set(iid, 'min', v)
         elif col == '#2':
-            v = simpledialog.askstring('名稱', '影片檔名用的名稱（英數字）', initialvalue=self.tree.set(iid, 'name'), parent=self)
-            if v: self.tree.set(iid, 'name', re.sub(r'[^0-9A-Za-z_\-]+', '_', v))
+            v = simpledialog.askstring('名稱', '遊戲名稱（中英數字；中文名稱的影片檔名會用代號）', initialvalue=self.tree.set(iid, 'name'), parent=self)
+            if v: self.tree.set(iid, 'name', re.sub(r'[^0-9A-Za-z_\-一-鿿()]+', '_', v))
         self._save_tree()
     def _bg(self, fn, *a):
         threading.Thread(target=fn, args=a, daemon=True).start()

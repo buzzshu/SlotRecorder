@@ -95,7 +95,8 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
     if d.free_disk_gb(vdir) < MIN_FREE_DISK_GB + minutes / 60 * 1.5:
         log(f'not enough disk space in {vdir}: {d.free_disk_gb(vdir):.1f} GB free'); return 2
     group = os.environ.get('SLOTREC_GROUP', '')              # multi-emulator run: several jobs start the same slot together
-    base = os.path.join(vdir, f'{time.strftime("%Y%m%d_%H%M%S")}_{name}' + (f'_e{d.IDX}' if group else ''))
+    fname = name if name.isascii() else slot_id               # Chinese display names: ASCII file names (OpenCV / tools)
+    base = os.path.join(vdir, f'{time.strftime("%Y%m%d_%H%M%S")}_{fname}' + (f'_e{d.IDX}' if group else ''))
     snapdir = base + '_snaps'; os.makedirs(snapdir, exist_ok=True)
     log(f'=== {p["name"]} / {name}  {minutes} min  (emulator {d.IDX} {d.SER}) ===')
     log('STATUS entering')
@@ -315,13 +316,13 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                                 tapev('btn', tb[0])
                             elif rep['spin'] < 3 and app.spin_visible(im):
                                 d.tap(*app.lay()['spin_xy']); rep['spin'] += 1; log('tap lit SPIN (overlay/tutorial)')
-                            elif (ob := safe_button(im, rep['skip']))[0] and not (ob[1] == rep['ocr'][0] and rep['ocr'][1] >= 3):
+                            elif (ob := safe_button(im, rep['skip'], app.ocr_ignore(im)))[0] and not (ob[1] == rep['ocr'][0] and rep['ocr'][1] >= 3):
                                 rep['ocr'] = (ob[1], rep['ocr'][1] + 1 if ob[1] == rep['ocr'][0] else 1)
                                 d.tap(*ob[0]); st['popups'] += 1; popup_times.append(now); log('OCR tap', ob[1], ob[0]); snap('ocr', im)
                                 tapev('ocr', ob[1])
                             elif dur > 10 and ocr.LAST_DANGER:            # price / BUY page without a NO-THANKS button
                                 d.back(); st['backs'] += 1; back_streak += 1; log('purchase-like page -> BACK (no centre tap)')
-                            elif dur > 10 and H > W:
+                            elif dur > 10 and (H > W or p.get('centre_tap_landscape')):
                                 d.tap(W // 2, H // 2); centre_taps += 1; span['centre'] = span.get('centre', 0) + 1
                                 log('tap centre (off >10s)')
                         popup_times = [t for t in popup_times if now - t < 120]

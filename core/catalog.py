@@ -71,7 +71,31 @@ def _split_stacked(gy, x, y, w, h):
                 a, b = g1[-1], g2[0]; return [(x, y, w, a), (x, y + b, w, h - b)]
     return [(x, y, w, h)]
 
+def _anchor_tiles(im, cfg):
+    """lobbies whose tiles have no clear border (包你發): every tile carries a small button at its bottom-right corner
+    (download arrow / heart). Find those, then the tile = a fixed box up-left of it: 'small' when another button sits
+    straight above or below it (two tiles stacked in that column), else 'big' (one tall tile)."""
+    x0, x1, y0, y1 = cfg['region']; g = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+    pts = []
+    for t in cfg['_anchor_imgs']:
+        tg = cv2.cvtColor(t, cv2.COLOR_BGR2GRAY)[8:-8, 8:-8]          # inner part: the button is semi-transparent
+        r = cv2.matchTemplate(g[y0:y1, x0:x1], tg, cv2.TM_CCOEFF_NORMED)
+        while True:
+            _, mx, _, loc = cv2.minMaxLoc(r)
+            if mx < cfg.get('anchor_threshold', 0.85): break
+            p = (loc[0] + x0 + tg.shape[1] // 2, loc[1] + y0 + tg.shape[0] // 2)
+            if not any(abs(p[0] - q[0]) < 30 and abs(p[1] - q[1]) < 30 for q in pts): pts.append(p)
+            cv2.rectangle(r, (loc[0] - 30, loc[1] - 30), (loc[0] + 30, loc[1] + 30), -1, -1)
+    mid = (y0 + y1) / 2; sx, sy, sw, sh = cfg['small_box']; bx, by, bw, bh = cfg['big_box']   # boxes relative to the button
+    out = []
+    for ix, iy in pts:
+        stacked = any(abs(jx - ix) < 25 and 150 < abs(jy - iy) < 280 for jx, jy in pts)
+        x, y, w, h = (ix + sx, iy + sy, sw, sh) if (stacked or iy < mid) else (ix + bx, iy + by, bw, bh)
+        if x >= x0 and y >= y0 - 10 and x + w <= x1: out.append((x, max(0, y), w, h))
+    return out
+
 def find_tiles(im, cfg):
+    if cfg.get('_anchor_imgs'): return _anchor_tiles(im, cfg)
     g = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY).astype(np.float32)
     gx = np.abs(cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)); gy = np.abs(cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3))
     x0, x1, y0, y1 = cfg['region']; classes = cfg['classes']; wmax = max(c['w'][1] for c in classes)
@@ -143,9 +167,17 @@ def walk(app, max_steps=150, say=log):
             act = app.dismiss_once(im, allow_back=False); say('popup', act); time.sleep(3); im = d.grab()
         frames.append((f'{i:03d}', im))
         yl = y0 + (y1 - y0) * 2 // 5                              # lower tile half: side ads / jackpot meters keep animating
-        sig = signature(im[yl:y1, x0:x1])
-        same = same + 1 if (app.is_lobby(im) and prev is not None and not changed(prev, sig, 1.5)) else 0
-        prev = sig
+        if sc.get('rewind_by_shift'):                              # animated tiles: did the tiles MOVE?
+            gq = cv2.resize(cv2.cvtColor(im[yl:y1, x0:x1], cv2.COLOR_BGR2GRAY), None, fx=0.5, fy=0.5).astype(np.float32)
+            moved = True
+            if prev is not None and getattr(prev, 'shape', None) == gq.shape:
+                (dx, dy), resp = cv2.phaseCorrelate(prev, gq); moved = not (abs(dx) < 3 and abs(dy) < 2 and resp > 0.1)
+            same = same + 1 if (app.is_lobby(im) and prev is not None and not moved) else 0
+            prev = gq
+        else:
+            sig = signature(im[yl:y1, x0:x1])
+            same = same + 1 if (app.is_lobby(im) and prev is not None and not changed(prev, sig, 1.5)) else 0
+            prev = sig
         if same >= 3: say(f'end of lobby after {i} steps'); break
         d.swipe(*sc['step_swipe']); time.sleep(2.5)
     return frames
@@ -157,7 +189,7 @@ def scan(app, say=log):
     os.makedirs(os.path.join(out, 'frames'))
     frames = walk(app, say=say)
     for n, im in frames: imwrite(os.path.join(out, 'frames', n + '.png'), im)
-    tiles = collect(frames, app.p['catalog'])
+    tiles = collect(frames, catalog_cfg(app))
     meta = []
     for i, t in enumerate(tiles):
         imwrite(os.path.join(out, f'{i:03d}.png'), t['crop'])
@@ -165,6 +197,12 @@ def scan(app, say=log):
     with open(os.path.join(out, 'catalog.json'), 'w', encoding='utf-8') as f: json.dump(meta, f, indent=1, ensure_ascii=False)
     say(f'catalog: {len(tiles)} tiles from {len(frames)} lobby screens -> {out}')
     return meta
+
+def catalog_cfg(app):
+    """profile 'catalog' + the anchor button images when the app uses anchor mode"""
+    cfg = dict(app.p['catalog'])
+    if cfg.get('anchors'): cfg['_anchor_imgs'] = [im for im in (imread(app.t.path(n)) for n in cfg['anchors'] if app.t.path(n)) if im is not None]
+    return cfg
 
 def ignore_tile(app, img, name):
     """remember a tile that is not wanted, so later scans do not add it again"""

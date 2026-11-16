@@ -1,0 +1,272 @@
+{
+  "name": "包你發娛樂城",
+  "package": "com.jumbo.yirufa",
+  "activity": "com.jumbogames.nativeplugin.YiRuFaUnityActivity",
+  "launch_wait": 60,
+  "screen": [
+    1280,
+    720
+  ],
+  "lobby_marker": "lobby_guild",
+  "ingame_marker": "ingame_bet",
+  "spin_btn": "spin_btn",
+  "spin_xy": [
+    628,
+    1195
+  ],
+  "bet_cycle_xy": [
+    202,
+    1218
+  ],
+  "bet_minus_xy": [
+    202,
+    1218
+  ],
+  "exit_slot_xy": [
+    48,
+    45
+  ],
+  "play_btn": "btn_play_now",
+  "before_play_xy": [
+    422,
+    672
+  ],
+  "enter_dismiss": true,
+  "lobby_tab_xy": [
+    72,
+    450
+  ],
+  "x_templates": [
+    "x_blue",
+    "x_purple_glow",
+    "x_round",
+    "x_plain",
+    "x_info"
+  ],
+  "dismiss_templates": [
+    [
+      "guide_overlay",
+      0.85
+    ],
+    [
+      "tut_newbie_btn",
+      0.85
+    ],
+    [
+      "tos_checkbox",
+      0.85
+    ],
+    [
+      "btn_tos_agree",
+      0.85
+    ],
+    [
+      "btn_guest",
+      0.85
+    ],
+    [
+      "btn_play_gift",
+      0.8
+    ],
+    [
+      "btn_claim_welcome",
+      0.8
+    ],
+    [
+      "btn_go_lobby",
+      0.8
+    ],
+    [
+      "btn_skip_guide_ok",
+      0.85
+    ],
+    [
+      "btn_claim_green",
+      0.85
+    ],
+    [
+      "btn_ratio_ok",
+      0.85
+    ],
+    [
+      "select_home",
+      0.85
+    ]
+  ],
+  "ocr_ignore": {
+    "landscape": [
+      [
+        0,
+        0,
+        1140,
+        125
+      ],
+      [
+        1140,
+        75,
+        1280,
+        125
+      ],
+      [
+        900,
+        340,
+        1280,
+        560
+      ],
+      [
+        0,
+        685,
+        1280,
+        720
+      ]
+    ],
+    "portrait": [
+      [
+        0,
+        0,
+        720,
+        130
+      ],
+      [
+        660,
+        980,
+        720,
+        1110
+      ]
+    ]
+  },
+  "lobby_scan": {
+    "rewind_swipe": [
+      300,
+      400,
+      1050,
+      400,
+      150
+    ],
+    "rewind_times": 12,
+    "step_swipe": [
+      900,
+      400,
+      450,
+      400,
+      1500
+    ],
+    "max_steps": 40,
+    "region": [
+      130,
+      120,
+      1100,
+      600
+    ],
+    "threshold": 0.6,
+    "rewind_by_shift": true
+  },
+  "reset": "new_instance",
+  "low_balance_bets": 5,
+  "meters": {
+    "balance": [
+      140,
+      40,
+      300,
+      82
+    ],
+    "bet": [
+      262,
+      1196,
+      418,
+      1244
+    ]
+  },
+  "paytable": {
+    "open": [
+      [
+        "btn_drawer",
+        "btn_drawer_land"
+      ],
+      "btn_rules"
+    ],
+    "next_swipe": [
+      600,
+      650,
+      120,
+      650,
+      400
+    ],
+    "opened_tpl": "x_info",
+    "close_tpl": "x_info",
+    "page_wait": 1.8,
+    "next_swipe_land": [
+      900,
+      360,
+      300,
+      360,
+      400
+    ]
+  },
+  "notes": "弈樂科技 (Jumbo) 自家 app. Lobby landscape, slots portrait. Guest = 立即遊玩 (Cloudflare check passes by itself) + 使用者規章 checkbox + 我同意. Guests can only play 體驗廳 (1:100 coins; 一般廳 needs VIP / 金卡). Bets 50/100/250/500/1000 on one cycling button. Tile tap 1 = download, tap 2 = machine select -> 馬上玩. BACK on the select screen asks to QUIT the app (danger words). Weekly maintenance Thu 09:30-12:00. Guest account is DEVICE-BOUND (pm clear logs back into the same guest) -> reset new_instance like 88F.",
+  "catalog": {
+    "region": [
+      130,
+      1105,
+      115,
+      600
+    ],
+    "anchors": [
+      "tile_download",
+      "tile_heart"
+    ],
+    "anchor_threshold": 0.85,
+    "small_box": [
+      -185,
+      -160,
+      170,
+      140
+    ],
+    "big_box": [
+      -205,
+      -330,
+      190,
+      310
+    ],
+    "inset": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  "landscape": {
+    "ingame_marker": "ingame_bet_land",
+    "spin_xy": [
+      1128,
+      668
+    ],
+    "bet_cycle_xy": [
+      290,
+      678
+    ],
+    "bet_minus_xy": [
+      290,
+      678
+    ],
+    "exit_slot_xy": [
+      45,
+      28
+    ],
+    "meters": {
+      "balance": [
+        490,
+        8,
+        740,
+        50
+      ],
+      "bet": [
+        345,
+        655,
+        480,
+        702
+      ]
+    }
+  },
+  "centre_tap_landscape": true
+}

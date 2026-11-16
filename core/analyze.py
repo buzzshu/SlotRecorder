@@ -544,6 +544,11 @@ th{{background:#f3f3f3}}td:first-child,th:first-child{{text-align:left}}.big{{fo
 <h3>注意事項</h3><ul>{w}<li>單台的 RTP 會因帳號、時段不同而起伏；合併後局數較多，範圍較窄。</li>
 <li>每支影片各自的明細見同名的 _summary.html。</li></ul></html>"""
 
+def _fsafe(name, slot=None):
+    """file-name part: ASCII names as they are, others -> the slot id"""
+    n = str(name or '')
+    return n if (n.isascii() and not re.search(r'[\\/:*?"<>|]', n)) else re.sub(r'[^0-9A-Za-z_\-]+', '_', str(slot or 'game'))
+
 def merge_group(group, app_id, say=print):
     """every video of one multi-emulator run (stats.json group == id) -> one merged report per slot. -> [html paths]"""
     vdir = video_dir(app_id); by_slot = {}
@@ -559,8 +564,8 @@ def merge_group(group, app_id, say=print):
     for (slot, name), vids in by_slot.items():
         say(f'--- {name}: {len(vids)} video(s) ---')
         try:
-            merge(vids, os.path.join(vdir, f'{group}_{name}_merged'), app_id, say)
-            out.append(os.path.join(vdir, f'{group}_{name}_merged_summary.html'))
+            merge(vids, os.path.join(vdir, f'{group}_{_fsafe(name, slot)}_merged'), app_id, say)
+            out.append(os.path.join(vdir, f'{group}_{_fsafe(name, slot)}_merged_summary.html'))
         except SystemExit as e: say(f'{name}: {e}')
         except Exception as e: say(f'{name}: merge failed {e!r}')            # one bad slot must not stop the others
     if not by_slot: say(f'no videos of group {group} in {vdir}')
@@ -588,7 +593,7 @@ if __name__ == '__main__':
         for slot, vids in by_slot.items():
             if len(vids) < 2: continue
             name = slot
-            try: merge(vids, os.path.join(os.path.dirname(os.path.abspath(vids[0])), f'{time.strftime("%Y%m%d_%H%M%S")}_{name}_merged'), a.app)
+            try: merge(vids, os.path.join(os.path.dirname(os.path.abspath(vids[0])), f'{time.strftime("%Y%m%d_%H%M%S")}_{_fsafe(name, slot)}_merged'), a.app)
             except SystemExit as e: print(name, '->', e)
     if a.videos:
         from .overview import safe_build

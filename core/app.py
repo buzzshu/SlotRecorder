@@ -137,6 +137,16 @@ class App:
             if c: return name, c
         return None
 
+    def ocr_ignore(self, im):
+        """profile 'ocr_ignore': {'landscape': [[x0,y0,x1,y1]...], 'portrait': [...]} = screen parts whose text the OCR
+        button finder must not read (top bar with VIP badge / balance with decimals, news ticker, a 'buy feature' button)"""
+        cfg = self.p.get('ocr_ignore') or {}
+        return [tuple(b) for b in cfg.get('landscape' if im.shape[1] > im.shape[0] else 'portrait', [])]
+
+    def lobby_tab(self):
+        """profile 'lobby_tab_xy': the lobby has categories (包你發: 老虎機) -> show the slot category before scanning"""
+        if self.p.get('lobby_tab_xy'): d.tap(*self.p['lobby_tab_xy']); time.sleep(2)
+
     def dismiss_once(self, im, allow_back=True, exclude=()):
         for name, thr in self.p.get('dismiss_templates', []):
             s, c = self.t.find(im, name, thr)
@@ -145,7 +155,7 @@ class App:
         if not c: s, c = self.find_x(im, full=True)
         if c: d.tap(*c); return f'tap X {c} {s:.2f}'
         from .ocr import safe_button
-        c, label = safe_button(im, exclude)
+        c, label = safe_button(im, exclude, self.ocr_ignore(im))
         if c: d.tap(*c); return f'OCR tap "{label}" {c}'
         if not allow_back: return None
         d.back(); return 'BACK'
@@ -204,6 +214,7 @@ class App:
     def rewind(self, max_flings=15):
         """fling the lobby back to its far-left start: repeat until the tiles stop moving (a fixed count is not
         enough when we come back from a slot at the far right end of a long lobby)"""
+        self.lobby_tab()
         sc = self.p['lobby_scan']; x0, y0, x1, y1 = sc['region']; prev = None; still = 0
         if self.p.get('catalog'): x0, x1, y0, y1 = self.p['catalog']['region']   # tiles only: side ads keep animating
         y0 = y0 + (y1 - y0) * 2 // 5                                  # lower tile half: jackpot meters on top keep ticking
@@ -211,6 +222,15 @@ class App:
             for _ in range(4): d.swipe(*sc['rewind_swipe']); time.sleep(0.25)
             time.sleep(1.2); im = d.grab()
             if not self.is_lobby(im): prev = None; still = 0; continue          # a popup covers the lobby
+            if sc.get('rewind_by_shift'):                     # animated tiles: measure how far the tiles MOVED instead
+                import cv2, numpy as np
+                g = cv2.resize(cv2.cvtColor(im[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY), None, fx=0.5, fy=0.5).astype(np.float32)
+                if prev is not None and getattr(prev, 'shape', None) == g.shape:
+                    (dx, dy), resp = cv2.phaseCorrelate(prev, g)
+                    still = still + 1 if (abs(dx) < 3 and abs(dy) < 2 and resp > 0.1) else 0   # low response = unrelated frames
+                prev = g
+                if still >= 2: return True
+                continue
             sig = signature(im[y0:y1, x0:x1])
             still = still + 1 if (prev is not None and not changed(prev, sig, 8)) else 0   # a fling moves ~40; banners ~3-6
             prev = sig
@@ -261,7 +281,12 @@ class App:
                 d.tap(*self.lay(im)['spin_xy']); spin_taps += 1; log('tap lit SPIN (tutorial)'); continue
             if self.p.get('play_btn'):
                 s, pb = self.t.find(im, self.p['play_btn'], 0.75)
-                if pb: d.tap(*pb); log('tap PLAY'); continue
+                if pb:
+                    if self.p.get('before_play_xy'): d.tap(*self.p['before_play_xy']); time.sleep(1.5)   # 包你發: 體驗廳 tab
+                    d.tap(*pb); log('tap PLAY'); continue
+            if self.p.get('enter_dismiss') and not self.is_lobby(im):     # notices between the tile and the slot
+                act = self.dismiss_once(im, allow_back=False)
+                if act: log('entering:', act); continue
             s, x = self.find_x(im)
             if x: d.tap(*x); log('popup X', x); continue
             if self.is_lobby(im):               # tile tap did nothing (slot still downloading?) -> retap after 30 s
@@ -309,6 +334,7 @@ class App:
         im = d.grab()
         if not self.in_game(im): return None
         L = self.lay(im)
+        if L.get('bet_cycle_xy') or self.p.get('bet_cycle_xy'): return self._min_bet_cycle(L.get('bet_cycle_xy') or self.p['bet_cycle_xy'])
         for _ in range(self.p.get('bet_minus_taps', 12)): d.tap(*L['bet_minus_xy']); time.sleep(0.4)
         if not (L.get('meters') or {}).get('bet'): return None
         time.sleep(1); a = self._read_bet()
@@ -321,6 +347,23 @@ class App:
                 c = self._read_bet(); log(f'bet wrapped ({b:,}) -> back to {c}'); return c
             a = b
         log('bet: kept dropping after 25 extra taps'); return a
+
+    def _min_bet_cycle(self, xy):
+        """one bet button that cycles up and wraps to the lowest bet (包你發: 50 -> 100 -> ... -> 1000 -> 50):
+        tap until the bet goes DOWN = the minimum"""
+        a = self._read_bet(); seen = [a] if a is not None else []; blind = 0 if a is not None else 1
+        for _ in range(int(self.p.get('bet_cycle_max', 15))):
+            d.tap(*xy); time.sleep(1.2); b = self._read_bet()
+            if b is None:
+                blind += 1
+                if blind >= 3 and not seen: log('bet: unreadable -> not changed further'); return None
+                continue
+            if a is not None and b < a and b <= min(seen):           # dropped to the lowest value seen = wrapped
+                time.sleep(0.8); b2 = self._read_bet()
+                if b2 == b: log(f'bet confirmed minimum (wrapped): {b:,}'); return b
+                b = b2 if b2 is not None else b                  # misread -> keep cycling
+            seen.append(b); a = b
+        log('ESCALATE bet: no wrap-around seen (bet may not be the minimum)'); return None
 
     def level_until_slot(self, slot_id, interval=1.5):
         """new accounts may not list the target slot yet (88F: appears at ~level 6). profile 'leveling':
