@@ -96,7 +96,7 @@ class Live:
         n = len(spins)
         if not n: return None
         mult = [s['win'] / bet for s in spins]
-        feats = find_features(spins, bet, list(off) + [(t - 1, t + 1) for t, _, _ in jumps] + gwf, series=series)
+        feats = find_features(spins, bet, list(off) + gwf, series=series, strict=[(t - 1, t + 1) for t, _, _ in jumps])
         lo, hi = boot_rtp(mult, n=500)
         r = {'spins': n, 'rtp': float(np.mean(mult)), 'lo': lo, 'hi': hi, 'feats': len(feats), 'reads': len(self.series)}
         if self.write:

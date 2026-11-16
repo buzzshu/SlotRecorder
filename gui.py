@@ -360,9 +360,12 @@ class Gui(tk.Tk):
         ni = tk.BooleanVar(value=bool(cfg.get('new_instance_reset', True)))
         ttk.Checkbutton(win, text='88F 這類換不了帳號的 app 沒錢時：自動建一台全新模擬器接著錄（約 15 分鐘；不勾 = 停止錄影）',
                         variable=ni).grid(row=len(fields) + 1, column=1, sticky='w', padx=8)
+        tb = tk.BooleanVar(value=bool(cfg.get('turbo', True)))
+        ttk.Checkbutton(win, text='有速度鍵的遊戲（包你發）自動切到最快轉速（結果不變，每小時局數約 2 倍）',
+                        variable=tb).grid(row=len(fields) + 2, column=1, sticky='w', padx=8)
         su = tk.BooleanVar(value=os.path.exists(STARTUP_LNK))
         ttk.Checkbutton(win, text='開機登入 Windows 後自動開啟 SlotRecorder（當機 / 重開機中斷的錄影會自動接續）',
-                        variable=su).grid(row=len(fields) + 2, column=1, sticky='w', padx=8)
+                        variable=su).grid(row=len(fields) + 3, column=1, sticky='w', padx=8)
         def ok():
             if su.get() != os.path.exists(STARTUP_LNK): self._set_startup(su.get())
             new = dict(cfg)
@@ -385,10 +388,10 @@ class Gui(tk.Tk):
                 if k in ('ldplayer_dir', 'serial') and not val:
                     messagebox.showwarning('設定', f'「{dict(fields)[k]}」不能空白', parent=win); return
                 new[k] = val
-            new['auto_analyze'] = aa.get(); new['new_instance_reset'] = ni.get()
+            new['auto_analyze'] = aa.get(); new['new_instance_reset'] = ni.get(); new['turbo'] = tb.get()
             save_cfg(new); win.destroy()
             messagebox.showinfo('設定', '已儲存。請重新開啟 SlotRecorder 讓設定生效。', parent=self)
-        ttk.Button(win, text='儲存', command=ok).grid(row=len(fields) + 2, column=1, sticky='e', padx=8, pady=8)
+        ttk.Button(win, text='儲存', command=ok).grid(row=len(fields) + 4, column=1, sticky='e', padx=8, pady=8)
 
     # ---------------- crop dialog (shared) ----------------
     def _crop_window(self, im, title, min_px):

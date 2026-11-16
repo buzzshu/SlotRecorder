@@ -334,7 +334,9 @@ class App:
         im = d.grab()
         if not self.in_game(im): return None
         L = self.lay(im)
-        if L.get('bet_cycle_xy') or self.p.get('bet_cycle_xy'): return self._min_bet_cycle(L.get('bet_cycle_xy') or self.p['bet_cycle_xy'])
+        if L.get('bet_cycle_xy') or self.p.get('bet_cycle_xy'):
+            b = self._min_bet_cycle(L.get('bet_cycle_xy') or self.p['bet_cycle_xy'])
+            self.set_turbo(); return b
         for _ in range(self.p.get('bet_minus_taps', 12)): d.tap(*L['bet_minus_xy']); time.sleep(0.4)
         if not (L.get('meters') or {}).get('bet'): return None
         time.sleep(1); a = self._read_bet()
@@ -347,6 +349,24 @@ class App:
                 c = self._read_bet(); log(f'bet wrapped ({b:,}) -> back to {c}'); return c
             a = b
         log('bet: kept dropping after 25 extra taps'); return a
+
+    def set_turbo(self, im=None):
+        """profile 'turbo': {'xy': [x, y], 'on': [template, ...]} (+ landscape 'turbo_xy'): the fastest spin-animation
+        setting (results are the same, only the animation is shorter). Taps the speed button until an 'on' look shows."""
+        cfg = self.p.get('turbo')
+        if not cfg or not CFG.get('turbo', True): return None
+        if time.time() < getattr(self, '_turbo_skip_until', 0): return None        # failed recently -> leave it
+        im = im if im is not None else d.grab()
+        if not self.in_game(im): return None                                    # popup / lobby: never tap blindly
+        xy = self.lay().get('turbo_xy') or cfg['xy']                            # current layout, not re-detected
+        x, y = xy; roi = (max(0, x - 70), max(0, y - 50), x + 70, y + 50)
+        def look(img, names): return any(self.t.find(img, n, 0.85, region=roi)[1] for n in names)
+        for k in range(cfg.get('max_taps', 3) + 1):
+            if look(im, cfg['on']): log('turbo on' if k else 'turbo already on'); return True
+            if k == cfg.get('max_taps', 3) or not look(im, cfg.get('other', [])) or not self.in_game(im): break
+            d.tap(*xy); time.sleep(1.2); im = d.grab()                          # only taps a recognised speed button
+        self._turbo_skip_until = time.time() + 1800
+        log('turbo: speed button not recognised here -> not touched for 30 min'); return False
 
     def _min_bet_cycle(self, xy):
         """one bet button that cycles up and wraps to the lowest bet (包你發: 50 -> 100 -> ... -> 1000 -> 50):

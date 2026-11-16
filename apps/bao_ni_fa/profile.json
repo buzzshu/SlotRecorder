@@ -266,7 +266,27 @@
         480,
         702
       ]
-    }
+    },
+    "turbo_xy": [
+      198,
+      678
+    ]
   },
-  "centre_tap_landscape": true
+  "centre_tap_landscape": true,
+  "turbo": {
+    "xy": [
+      78,
+      1218
+    ],
+    "on": [
+      "turbo_max",
+      "turbo_max_land"
+    ],
+    "other": [
+      "turbo_off",
+      "turbo_mid",
+      "turbo_off_land",
+      "turbo_mid_land"
+    ]
+  }
 }

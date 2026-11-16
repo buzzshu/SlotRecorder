@@ -181,19 +181,41 @@ def off_spans(stats):
     for a, b, info in stats.get('timeline') or []:
         try: i = json.loads(info) if isinstance(info, str) else (info or {})
         except ValueError: i = {}
-        if any(i.get(k) for k in ('esc', 'lobby', 'frozen', 'x', 'btn')) or i.get('centre', 0) >= 3: out.append((a, b))
+        if any(i.get(k) for k in ('esc', 'lobby', 'frozen', 'x', 'btn')) or i.get('centre', 0) >= 1: out.append((a, b))
     return out
 
-def find_features(spins, bet, excl=(), gap=FEATURE_GAP_S, series=None):
+def feature_gap(spins):
+    """gap that marks a feature: 25 s at normal speed; shorter when the game spins faster (turbo), never below 18 s
+    (big-win celebrations do not get shorter with turbo). Spin interval = median over 5-spin windows (robust to the
+    sparse live readings)."""
+    t = [s['t'] for s in spins]
+    if len(t) < 12: return FEATURE_GAP_S
+    med = float(np.median([(t[k + 5] - t[k]) / 5 for k in range(len(t) - 5)]))
+    return max(18.0, FEATURE_GAP_S * min(1.0, med / 3.8))
+
+def _covered(a, b, spans):
+    """seconds of [a, b] covered by the union of spans"""
+    iv = sorted((max(a, x), min(b, y)) for x, y in spans if y > a and x < b); tot = 0.0; cur = None
+    for x, y in iv:
+        if cur and x <= cur[1]: cur[1] = max(cur[1], y)
+        else:
+            if cur: tot += cur[1] - cur[0]
+            cur = [x, y]
+    return tot + (cur[1] - cur[0] if cur else 0.0)
+
+def find_features(spins, bet, excl=(), gap=None, series=None, strict=()):
+    """excl: popup / gift spans - the in-game rest of the gap must still be >= gap (a big-win screen or a rating popup
+    after a feature is common). strict: spans that disqualify the whole gap (unexplained balance jumps)"""
     """a spin that won and after which no new bet was paid for >= gap seconds (outside popup / stuck spans) = a feature
     was triggered on it (its win includes the whole feature). -> [{'spin', 't0', 't1', 'seconds', 'win', 'x'}]"""
-    feats = []
+    feats = []; gap = gap or feature_gap(spins)
     for k in range(len(spins) - 1):
         s, t1 = spins[k], spins[k + 1]['t']; g = t1 - s['t']
         if g < gap or s['win'] <= 0: continue
-        if any(a < t1 and b > s['t'] for a, b in excl): continue
+        if any(a < t1 and b > s['t'] for a, b in strict): continue
+        if g - _covered(s['t'], t1, excl) < gap: continue
         if series is not None:                                 # meter unreadable most of the gap -> not evidence of a feature
-            inside = [v for t, v in series if s['t'] < t < t1]
+            inside = [v for t, v in series if s['t'] < t < t1 and not any(x <= t <= y for x, y in excl)]   # in-game part only
             if inside and sum(v is not None for v in inside) / len(inside) < 0.5: continue
         feats.append({'spin': k + 1, 't0': s['t'], 't1': t1, 'seconds': round(g), 'win': float(s['win']), 'x': float(s['win'] / bet)})
     return feats
@@ -222,11 +244,11 @@ def confirm_features(feats, mp4, app_id, gift_windows=(), say=print):
     finally: cap.release()
     return out
 
-def feature_summary(feats, n_spins, tot_bet):
+def feature_summary(feats, n_spins, tot_bet, gap=FEATURE_GAP_S):
     xs = [f['x'] for f in feats]
     return {'count': len(feats), 'every_n': round(n_spins / len(feats), 1) if feats else None,
             'avg_x': float(np.mean(xs)) if xs else None, 'max_x': float(max(xs)) if xs else None,
-            'rtp_share': float(sum(f['win'] for f in feats) / tot_bet) if tot_bet else 0.0, 'gap_s': FEATURE_GAP_S}
+            'rtp_share': float(sum(f['win'] for f in feats) / tot_bet) if tot_bet else 0.0, 'gap_s': round(gap)}
 
 def cut_features(mp4, feats, say=print, max_clips=60):
     """<video>_features/NN_<time>_<x>x.mp4 (5 s before to 5 s after) + _start.jpg / _end.jpg, cut without re-encoding"""
@@ -306,7 +328,8 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
     off_s = sum(b - a for a, b, _ in (stats.get('timeline') or []))
     play_h = max(1e-6, (vid_s - off_s) / 3600)
     top = sorted(range(n), key=lambda i: -wins[i])[:10]
-    feats = confirm_features(find_features(spins, bet, off_spans(stats) + [(t - 1, t + 1) for t, _, _ in jumps], series=series), mp4, app_id, gift_windows, say)
+    feats = confirm_features(find_features(spins, bet, off_spans(stats) + list(gift_windows), series=series,
+                                           strict=[(t - 1, t + 1) for t, _, _ in jumps]), mp4, app_id, (), say)
     try: cut_features(mp4, feats, say)
     except Exception as e: say(f'feature clips failed: {e!r}')
     summary = {
@@ -320,7 +343,7 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
         'top_wins': [{'time': hms(spins[i]['t']), 'win': float(wins[i]), 'x': float(mult[i])} for i in top if wins[i] > 0],
         'gifts': [{'time': hms(t), 'coins': c} for t, c in gifts], 'jumps': [{'time': hms(t), 'coins': c, 'why': w} for t, c, w in jumps],
         'multi_spin_steps': len(odd),
-        'features': dict(feature_summary(feats, n, tot_bet), list=[{'time': hms(f['t0']), 'seconds': f['seconds'], 'win': f['win'],
+        'features': dict(feature_summary(feats, n, tot_bet, feature_gap(spins)), list=[{'time': hms(f['t0']), 'seconds': f['seconds'], 'win': f['win'],
                                                                    'x': f['x'], 'clip': f.get('clip')} for f in feats]),
         'balance_first': vals[0][1] if vals else None, 'balance_last': vals[-1][1] if vals else None,
         'meter_read_rate': round(read_ok, 3), 'analysis_seconds': round(time.time() - t_start),
@@ -406,7 +429,7 @@ th{{background:#f3f3f3}}td:first-child,th:first-child{{text-align:left}}.big{{fo
 <h3>非贏分的金額變動</h3>
 <table><tr><th>影片時間</th><th>金額</th><th>說明</th></tr>{gifts or '<tr><td colspan=3>無</td></tr>'}</table>
 <h3>注意事項</h3><ul>{w}<li>贏分＝餘額增加；免費遊戲、特色遊戲的贏分算在觸發的那一把。</li>
-<li>特色遊戲＝某一把贏分後超過 {FEATURE_GAP_S} 秒沒有再扣押注（免費遊戲、Hold &amp; Spin 這類期間不扣錢），而且期間畫面仍是遊戲本身；
+<li>特色遊戲＝某一把贏分後超過 {(s.get('features') or {}).get('gap_s', FEATURE_GAP_S)} 秒沒有再扣押注（免費遊戲、Hold &amp; Spin 這類期間不扣錢），而且期間畫面仍是遊戲本身；
 彈窗、領獎、卡住的時段不算。很長的大獎動畫可能被算進來；整個畫面換成另一個小遊戲的特色可能漏算。請用片段確認。</li>
 <li>關彈窗前後 12 秒內的加錢視為「贈送」，不算贏分（可能把少數真的贏分誤判成贈送，見上表）。</li></ul>
 <p style="color:#888">餘額讀取率 {s['meter_read_rate']:.0%}，分析耗時 {s['analysis_seconds']} 秒</p></html>"""
@@ -503,7 +526,7 @@ def _merge_features(parts, n, tot_bet):
     if not with_f: return {}
     fl = [x for s in with_f for x in (s['features'].get('list') or [])]
     return feature_summary([{'x': x['x'], 'win': x['win']} for x in fl], sum(s['spins'] for s in with_f),
-                           sum(s['total_bet'] for s in with_f))
+                           sum(s['total_bet'] for s in with_f), min(s['features'].get('gap_s', FEATURE_GAP_S) for s in with_f))
 
 def render_merged_html(s):
     e = html.escape
