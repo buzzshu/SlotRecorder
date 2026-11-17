@@ -151,8 +151,21 @@ def ensure_running(timeout=240):
 APK_CACHE = os.path.join(ROOT, 'apk_cache')
 SR_PREFIX = 'SR_'                        # instances created by SlotRecorder; the ONLY ones it may delete
 
+def app_version(pkg, serial=None):
+    """installed versionCode (int) or None."""
+    import re
+    out = (adb('shell', 'dumpsys', 'package', pkg, out=True, serial=serial) or b'').decode(errors='ignore')
+    m = re.search(r'versionCode=(\d+)', out)
+    return int(m.group(1)) if m else None
+
+def cached_version(pkg):
+    """versionCode of the cached (bundled) apks, recorded in apk_cache/<pkg>/version.txt, or None."""
+    try: return int(open(os.path.join(APK_CACHE, pkg, 'version.txt')).read().strip())
+    except (OSError, ValueError): return None
+
 def cache_apk(pkg, src_serial, say=log):
-    """keep a copy of the app's (split) APKs in apk_cache/<pkg>/ so a brand-new emulator can be set up without a source"""
+    """keep a copy of the app's (split) APKs in apk_cache/<pkg>/ so a brand-new emulator can be set up without a source.
+    Also records the source's versionCode in version.txt so ensure_app can upgrade an emulator stuck on an older version."""
     dst = os.path.join(APK_CACHE, pkg)
     if apk_cached(pkg): return True
     out = (adb('shell', 'pm', 'path', pkg, out=True, serial=src_serial) or b'').decode(errors='ignore')
@@ -163,11 +176,15 @@ def cache_apk(pkg, src_serial, say=log):
         subprocess.run([ADB, '-s', src_serial, 'pull', p, os.path.join(tmp, f'{i}_{os.path.basename(p)}')],
                        capture_output=True, timeout=600, creationflags=_NOWIN)
     ok = all(os.path.exists(os.path.join(tmp, f'{i}_{os.path.basename(p)}')) for i, p in enumerate(paths))
+    v = app_version(pkg, src_serial)
+    if v is not None:
+        try: open(os.path.join(tmp, 'version.txt'), 'w').write(str(v))   # travels inside the atomic move
+        except OSError: pass
     if ok:
         try: os.replace(tmp, dst)
         except OSError: ok = apk_cached(pkg)                         # another job finished first -> use theirs
     shutil.rmtree(tmp, ignore_errors=True)
-    say(f'cache_apk {pkg}: {len(paths)} apk(s) ' + ('ok' if ok else 'FAILED')); return ok
+    say(f'cache_apk {pkg}: {len(paths)} apk(s)' + (f' v{v}' if v else '') + (' ok' if ok else ' FAILED')); return ok
 
 def apk_cached(pkg):
     d_ = os.path.join(APK_CACHE, pkg)

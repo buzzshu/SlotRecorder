@@ -80,7 +80,13 @@ def ensure_app(app, say):
     from . import device as d
     from .config import serial_for
     pkg = app.p['package']
-    if any(d.installed(pkg) or time.sleep(3) for _ in range(3)): return True    # 3 tries: one adb hiccup != not installed
+    if any(d.installed(pkg) or time.sleep(3) for _ in range(3)):                 # 3 tries: one adb hiccup != not installed
+        cv, iv = d.cached_version(pkg), d.app_version(pkg)                       # already installed: is it too old to run?
+        if cv and iv and cv > iv:                                               # a stale pre-installed app gets stuck on 「請更新」
+            say(f'✘ {app.p["name"]} 已安裝版本（{iv}）比打包的（{cv}）舊 -> 自動升級，避免卡在「請更新」畫面')
+            if d.install_cached(pkg, d.SER, say): app.restart(wait=60)          # -r keeps the account data
+            else: say(f'  自動升級失敗（簽章不符或空間不足）-> 請在模擬器 {d.IDX} 從 Play 商店手動更新 {app.p["name"]}')
+        return True
     say(f'{app.p["name"]} is not installed on emulator {d.IDX} -> installing')
     if not d.apk_cached(pkg):
         t0 = time.time()
