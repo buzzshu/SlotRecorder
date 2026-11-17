@@ -163,11 +163,12 @@ def cached_version(pkg):
     try: return int(open(os.path.join(APK_CACHE, pkg, 'version.txt')).read().strip())
     except (OSError, ValueError): return None
 
-def cache_apk(pkg, src_serial, say=log):
+def cache_apk(pkg, src_serial, say=log, force=False):
     """keep a copy of the app's (split) APKs in apk_cache/<pkg>/ so a brand-new emulator can be set up without a source.
-    Also records the source's versionCode in version.txt so ensure_app can upgrade an emulator stuck on an older version."""
+    Also records the source's versionCode in version.txt so ensure_app can upgrade an emulator stuck on an older version.
+    force=True re-pulls even when already cached (used to refresh the cache when a newer version appears)."""
     dst = os.path.join(APK_CACHE, pkg)
-    if apk_cached(pkg): return True
+    if apk_cached(pkg) and not force: return True
     out = (adb('shell', 'pm', 'path', pkg, out=True, serial=src_serial) or b'').decode(errors='ignore')
     paths = [l.split(':', 1)[1].strip() for l in out.splitlines() if l.startswith('package:')]
     if not paths: say(f'cache_apk: {pkg} not installed on {src_serial}'); return False
@@ -181,7 +182,9 @@ def cache_apk(pkg, src_serial, say=log):
         try: open(os.path.join(tmp, 'version.txt'), 'w').write(str(v))   # travels inside the atomic move
         except OSError: pass
     if ok:
-        try: os.replace(tmp, dst)
+        try:
+            if os.path.isdir(dst): shutil.rmtree(dst)               # force refresh: os.replace can't overwrite an existing dir
+            os.replace(tmp, dst)
         except OSError: ok = apk_cached(pkg)                         # another job finished first -> use theirs
     shutil.rmtree(tmp, ignore_errors=True)
     say(f'cache_apk {pkg}: {len(paths)} apk(s)' + (f' v{v}' if v else '') + (' ok' if ok else ' FAILED')); return ok

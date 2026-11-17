@@ -73,6 +73,38 @@ def store_redirect(app, say):
         return True
     return False
 
+def refresh_cache(app, say):
+    """keep apk_cache current automatically: if any running emulator has a NEWER version of the app than the cache,
+    re-cache from it (and update version.txt). Then ensure_app upgrades the other emulators to it. Pairs with Play
+    auto-update on one 'master' emulator (index 0): Play updates that one, this propagates it to the cache + all台."""
+    from . import device as d
+    from .config import serial_for
+    pkg = app.p['package']
+    lock = os.path.join(d.APK_CACHE, f'.refresh_{pkg}.lock')
+    try:
+        os.makedirs(d.APK_CACHE, exist_ok=True)
+        try: fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)   # one refresh at a time (multi-run has N processes)
+        except FileExistsError:
+            if time.time() - os.path.getmtime(lock) < 600: return      # another emulator is already refreshing -> skip
+            os.remove(lock); fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)   # stale lock (crash) -> take over
+        try:
+            cached = d.cached_version(pkg) or 0
+            best_s, best_v = None, cached
+            for i, _, run in d.instances():
+                if not run: continue
+                s = serial_for(i)
+                if not d.installed(pkg, serial=s): continue
+                v = d.app_version(pkg, serial=s) or 0
+                if v > best_v: best_s, best_v = s, v
+            if best_s:
+                say(f'偵測到較新的 {app.p["name"]}（版本 {best_v} > 快取 {cached}）-> 更新打包用的安裝檔')
+                d.cache_apk(pkg, best_s, say, force=True)
+        finally:
+            os.close(fd);
+            try: os.remove(lock)
+            except OSError: pass
+    except Exception as e: say('refresh_cache skipped', repr(e))    # never let a cache refresh stop a recording
+
 def ensure_app(app, say):
     """a fresh emulator (GUI multi-run creates SR_ ones) has no app yet -> install it from apk_cache (bundled with the tool,
     or filled from any running emulator that has the app). Then first start: new-account screens + long downloads.
@@ -124,6 +156,7 @@ def run(app_id, slot_ids, job, log_dir, minutes=None, split=1, group='', res=Non
                 + (f'  [group {group}: 1 of {split} emulators, each records the full length (more samples)]' if group else ''))
     try:
         if not d.ensure_running(timeout=360): log('emulator not available -> job stops'); res['reason'] = 'failed'; return 2
+        refresh_cache(app, log)                                # pull in a newer version (Play-updated master emulator) before install/upgrade
         if not ensure_app(app, log): log('app could not be installed -> job stops'); res['reason'] = 'failed'; return 2
     except d.StopRequested:
         log('STOP requested during setup'); res['reason'] = 'stopped'; return 2
