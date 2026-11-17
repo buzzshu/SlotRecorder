@@ -21,6 +21,36 @@ def _play_protected(pkg_dir):
         except (OSError, zipfile.BadZipFile): continue
     return False
 
+def refresh_cache_before_pack(say=print):
+    """before zipping, pull the NEWEST version of each already-cached app from any running emulator into apk_cache,
+    so every package you build bundles the latest (a 'master' emulator with Play auto-update stays current here)."""
+    try:
+        from . import device as d
+        if not os.path.isdir(APK_CACHE): return
+        cached_pkgs = [p for p in os.listdir(APK_CACHE)
+                       if os.path.isdir(os.path.join(APK_CACHE, p)) and any(f.endswith('.apk') for f in os.listdir(os.path.join(APK_CACHE, p)))]
+        if not cached_pkgs: return
+        running = [i for i, _, run in d.instances() if run]
+        if not running:
+            say('（沒有開機的模擬器可檢查更新，直接打包現有版本）'); return
+        best = {}                                               # pkg -> (serial, versionCode) across running emulators
+        for i in running:
+            d.use(i)
+            if not d.connect(): continue
+            for pkg in cached_pkgs:
+                if not d.installed(pkg): continue
+                v = d.app_version(pkg) or 0
+                if pkg not in best or v > best[pkg][1]: best[pkg] = (d.SER, v)
+        for pkg in cached_pkgs:
+            cached = d.cached_version(pkg) or 0
+            if pkg in best and best[pkg][1] > cached:
+                say(f'打包前更新 {pkg}：{cached} -> {best[pkg][1]}')
+                d.cache_apk(pkg, best[pkg][0], say, force=True)
+            else:
+                say(f'{pkg}：快取已是最新（{cached}）')
+    except Exception as e:
+        say(f'（打包前更新檢查略過：{e!r}）')                     # never let the update check stop packing
+
 def _bundle_apks():
     """-> {package: True/False protected} for packages whose cached apks will (not) be bundled; prints what it does."""
     out = {}
@@ -36,6 +66,7 @@ def pack(dest=None):
     from .version import VERSION
     dest = dest or os.path.join(os.path.dirname(ROOT), f'SlotRecorder_v{VERSION}_{time.strftime("%Y%m%d_%H%M")}.zip')
     top = os.path.basename(ROOT)
+    refresh_cache_before_pack()                                 # make sure apk_cache holds the latest before zipping
     protected = _bundle_apks()
     n = 0
     with zipfile.ZipFile(dest, 'w', zipfile.ZIP_DEFLATED) as z:
