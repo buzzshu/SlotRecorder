@@ -53,24 +53,51 @@ def mark_finished(jp, reason):
         with open(jp, 'w', encoding='utf-8') as f: json.dump(st, f, indent=1, ensure_ascii=False)
     except (OSError, ValueError): pass
 
+def store_redirect(app, say):
+    """a Play-protected app (Google Play integrity / pairip, e.g. 包你發) refuses to run when it was sideloaded instead of
+    installed from the Play Store: on first launch it bounces to the Store. -> True (blocked) when that is what happens."""
+    from . import device as d
+    store = seen_app = 0
+    for _ in range(6):
+        f = d.focus()
+        if f.endswith(app.p['activity']):
+            seen_app += 1
+            if seen_app >= 2: return False                     # app is running normally -> not redirected; stop waiting
+        elif 'com.android.vending' in f: store += 1
+        time.sleep(2)
+    if store >= 2 and seen_app == 0:
+        pkg = app.p['package']
+        say(f'✘ {app.p["name"]} 一開啟就被導向 Google Play 商店 -> 這個 app 有 Play 商店驗證（防側載），複製安裝的版本無法開啟。')
+        say(f'  請在模擬器 {d.IDX} 登入 Google 帳號，從 Play 商店搜尋並安裝「{app.p["name"]}」後再錄（登入請自行操作，工具不會代填帳密）。')
+        d.adb('shell', 'am', 'start', '-a', 'android.intent.action.VIEW', '-d', f'market://details?id={pkg}')   # open its Play page
+        return True
+    return False
+
 def ensure_app(app, say):
-    """a fresh emulator (GUI multi-run creates SR_ ones) has no app yet -> install it from apk_cache, which is filled
-    from any running emulator that has the app. Then first start: new-account screens + long downloads.
+    """a fresh emulator (GUI multi-run creates SR_ ones) has no app yet -> install it from apk_cache (bundled with the tool,
+    or filled from any running emulator that has the app). Then first start: new-account screens + long downloads.
     -> True when the app is installed (and, if it was just installed, in its lobby)"""
     from . import device as d
     from .config import serial_for
     pkg = app.p['package']
     if any(d.installed(pkg) or time.sleep(3) for _ in range(3)): return True    # 3 tries: one adb hiccup != not installed
     say(f'{app.p["name"]} is not installed on emulator {d.IDX} -> installing')
-    t0 = time.time()
-    while not d.apk_cached(pkg):
-        src = next((serial_for(i) for i, _, run in d.instances() if run and i != d.IDX and d.installed(pkg, serial=serial_for(i))), None)
-        if src and d.cache_apk(pkg, src, say): break
-        if time.time() - t0 > 600: say('no running emulator with the app to copy it from (10 min) -> give up'); return False
-        d.check_stop(); time.sleep(20)                         # the source emulator may still be booting
+    if not d.apk_cached(pkg):
+        t0 = time.time()
+        while not d.apk_cached(pkg):
+            others = [serial_for(i) for i, _, run in d.instances() if run and i != d.IDX]
+            src = next((s for s in others if d.installed(pkg, serial=s)), None)
+            if src and d.cache_apk(pkg, src, say): break
+            if not others:                                     # fresh PC: no running emulator can ever become a source
+                say(f'✘ 這台電腦沒有「{app.p["name"]}」的安裝檔（apk_cache 沒有打包這個 app），也沒有其他已開機、已裝此 app 的模擬器可複製。')
+                say( '  解法：把含安裝檔的 apk_cache 資料夾放進 SlotRecorder，或在這台模擬器登入 Google Play 手動安裝後再試。')
+                return False
+            if time.time() - t0 > 300: say(f'✘ 等了 5 分鐘仍找不到「{app.p["name"]}」的安裝來源 -> 放棄（請確認來源模擬器已開機並已安裝）'); return False
+            d.check_stop(); time.sleep(20)                     # a source emulator may still be booting
     if not d.install_cached(pkg, d.SER, say): return False
     say('first start of the app on this emulator (new account, downloads: can take 5-15 min)')
     app.restart(wait=60)
+    if store_redirect(app, say): return False                  # Play-protected app, sideload won't run -> stop with a clear message
     if not app.to_lobby(max_steps=80, restart_ok=False): say('lobby not reached yet -> the recorder keeps trying')
     return True
 
@@ -88,7 +115,7 @@ def run(app_id, slot_ids, job, log_dir, minutes=None, split=1, group='', res=Non
     def save(): json.dump(st, open(jp, 'w', encoding='utf-8'), indent=1, ensure_ascii=False)
     from .version import VERSION
     save(); log(f'JOB {job}: {len(slot_ids)} slot(s) on emulator {d.IDX} ({d.SER})  SlotRecorder v{VERSION}'
-                + (f'  [group {group}: 1 of {split} emulators, each records 1/{split} of the minutes]' if group else ''))
+                + (f'  [group {group}: 1 of {split} emulators, each records the full length (more samples)]' if group else ''))
     try:
         if not d.ensure_running(timeout=360): log('emulator not available -> job stops'); res['reason'] = 'failed'; return 2
         if not ensure_app(app, log): log('app could not be installed -> job stops'); res['reason'] = 'failed'; return 2
@@ -102,7 +129,8 @@ def run(app_id, slot_ids, job, log_dir, minutes=None, split=1, group='', res=Non
         if precise and not minutes:                            # 夠準就停: the list's minutes become the per-game cap
             from .config import CFG
             mins = float(CFG.get('precise_max_minutes') or 240)
-        if split > 1 and not minutes: mins = max(1, math.ceil(mins / split))
+        # NOTE: in a group run every emulator records the FULL minutes (N emulators x R cycles = more samples of the same slot),
+        # not minutes/N. The videos all carry the group id, so core.analyze --group merges them into one report per slot.
         log(f'SLOT {i}/{len(slot_ids)} {sid}')
         if precise:
             try:
@@ -125,8 +153,8 @@ def run(app_id, slot_ids, job, log_dir, minutes=None, split=1, group='', res=Non
     log('JOB FINISHED', out)
     res['reason'] = 'done' if all(out.get(s) == 'done' for s in slot_ids) else ('stopped' if d.stop_requested() else 'failed')
     name = next((n for i, n, _ in d.instances() if i == d.IDX), '')
-    if group and name.startswith(d.SR_PREFIX):                # helper emulator of a multi-run: shut it down (kept for next time)
-        log(f'shut down helper emulator {d.IDX} {name}'); d.ld('quit', '--index', str(d.IDX))
+    if group and name.startswith(d.SR_PREFIX) and not os.environ.get('SLOTREC_KEEP_EMU'):   # helper of a multi-run; keep it
+        log(f'shut down helper emulator {d.IDX} {name}'); d.ld('quit', '--index', str(d.IDX))   # up between repeat cycles
     return 0 if all(out.get(s) == 'done' for s in slot_ids) else 2
 
 if __name__ == '__main__':
