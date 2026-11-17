@@ -639,7 +639,7 @@ class Gui(tk.Tk):
             if d.free_disk_gb(vd) < need_disk and not messagebox.askyesno('資源不足', f'硬碟只剩 {d.free_disk_gb(vd):.1f} GB，這次約需 {need_disk:.0f} GB。仍要開始嗎？', parent=self): return
         group = 'G' + time.strftime('%Y%m%d_%H%M%S')
         self.groups[group] = {'app': a.id, 'idxs': set(), 'merged': False, 'slots': ids, 'n': n, 'precise': precise,
-                              'cycles': r, 'cycle': 0, 'use': list(use)}
+                              'cycles': r, 'use': list(use), 'done': {}, 'stopped': set()}   # done[idx]=finished cycles; stopped=no more cycles
         self.log(f'=== 同時錄製 {group}：{n} 台 × {len(ids)} 款 × 重複 {r} 次（新建 {new} 台）===')
         for i in use: self.jobs[i] = {'prep': True, 'app': a.id, 'state': '準備中', 'cur': f'{len(ids)} 款 × {n} 台 × {r} 次', 'group': group}
         self._refresh_jobs()
@@ -654,14 +654,19 @@ class Gui(tk.Tk):
             self.q.put(('emus', None)); self.q.put(('multi_go', group, got))
         self._bg(work)
     def _run_cycle(self, group):
-        """launch (or re-launch) the group's emulators for the next repeat cycle. Helper SR_ emulators stay up between
-        cycles (keep=True) and are shut down only on the last cycle."""
+        """start EVERY emulator on its first repeat cycle (they then advance independently, no waiting for each other)."""
         g = self.groups.get(group)
         if not g: return
-        g['cycle'] += 1; last = g['cycle'] >= g['cycles']
-        if g['cycles'] > 1: self.log(f'--- {group}：第 {g["cycle"]}/{g["cycles"]} 輪開始 ---')
-        for i in g['use']:
-            self._launch(i, g['app'], g['slots'], f'{group}_c{g["cycle"]}_e{i}', g['n'], group, g['precise'], keep=not last)
+        g['done'] = {i: 0 for i in g['use']}; g['stopped'] = set()
+        for i in g['use']: self._launch_cycle(group, i)
+    def _launch_cycle(self, group, idx):
+        """launch emulator idx for its NEXT repeat cycle. Each emulator repeats on its own clock; a slow emulator just
+        ends up with fewer videos rather than making the others wait. Helper SR_ stays up until that台's own last cycle."""
+        g = self.groups.get(group)
+        if not g: return
+        c = g['done'].get(idx, 0) + 1                                        # the cycle number this emulator is about to record
+        if g['cycles'] > 1: self.log(f'--- {group}：模擬器 {self.emu_name(idx)} 第 {c}/{g["cycles"]} 輪開始 ---')
+        self._launch(idx, g['app'], g['slots'], f'{group}_c{c}_e{idx}', g['n'], group, g['precise'], keep=c < g['cycles'])
     def _schedule(self):
         v = simpledialog.askstring('定時開始', '幾點開始？（24 小時制，例如 22:30；已過的時間 = 明天）\n'
                                    '會用「目前選的 App、模擬器、勾選的 slot」。時間到會自動開模擬器。GUI 視窗要保持開著。', parent=self)
@@ -709,13 +714,18 @@ class Gui(tk.Tk):
         if j and j.get('sched') and not j.get('proc'):
             del self.jobs[idx]; self.log(f'已取消模擬器 {self.emu_name(idx)} 的排程'); self._refresh_jobs(); return
         if not self.running(idx): messagebox.showinfo('停止', f'模擬器 {self.emu_name(idx)} 沒有在錄製', parent=self); return
+        g = self.groups.get(j.get('group') or '')
+        if g and 'done' in g: g.setdefault('stopped', set()).add(idx)   # repeat run: no more cycles for this emulator
         open(d.stop_file(idx), 'w').close(); j['state'] = '停止中（收尾合併影片，最多約 1 分鐘）'
         self.log(f'--- 模擬器 {self.emu_name(idx)}：已要求停止，會把已錄的部分存好 ---'); self._refresh_jobs()
     def _stop_all(self):
         for idx in [i for i, j in self.jobs.items() if j.get('sched') and not j.get('proc')]: del self.jobs[idx]
         if not any(self.running(i) for i in self.jobs): self._refresh_jobs(); return
         for i, j in self.jobs.items():
-            if j.get('proc') and j['proc'].poll() is None: open(d.stop_file(i), 'w').close(); j['state'] = '停止中…'
+            if j.get('proc') and j['proc'].poll() is None:
+                g = self.groups.get(j.get('group') or '')
+                if g and 'done' in g: g.setdefault('stopped', set()).add(i)   # no more repeat cycles
+                open(d.stop_file(i), 'w').close(); j['state'] = '停止中…'
         self.log('--- 全部停止：每台都會把已錄的部分存好 ---'); self._refresh_jobs()
     def _open_videos(self):
         a = self.app(); os.startfile(video_dir(a.id if a else ''))
@@ -904,19 +914,30 @@ class Gui(tk.Tk):
                     sf = d.stop_file(idx)
                     if os.path.exists(sf): os.remove(sf)
                     self.log(f'=== 模擬器 {self.emu_name(idx)} 工作結束 ===')
-                    self._maybe_merge(j.get('group'))
+                    self._advance_cycle(j.get('group'), idx)
         except queue.Empty: pass
         if dirty: self._refresh_jobs()
         self.after(150, self._poll)
 
+    def _advance_cycle(self, group, idx):
+        """one emulator finished one cycle. If it still has cycles left, start its next one right away (no waiting for the
+        others). When every emulator has finished all its cycles, merge the group's videos per slot."""
+        g = self.groups.get(group or '')
+        if not g or g.get('merged'): return
+        if 'done' in g and idx in g['done']:                   # multi-run with repeat: advance this emulator on its own
+            g['done'][idx] += 1
+            if g['done'][idx] < g['cycles'] and idx not in g.get('stopped', ()):   # stopped台 does not start a new cycle
+                if self._alive(self.jobs.get(idx)): return     # a stray late event; its next cycle is already running
+                self._launch_cycle(group, idx); return
+        # this emulator is done (all cycles or stopped) -> merge only once every emulator is finished and none still recording
+        if any(g['done'].get(i, 0) < g['cycles'] and i not in g.get('stopped', ()) for i in g.get('use', [])): return
+        if any(self._alive(self.jobs.get(i)) and self.jobs[i].get('group') == group for i in g['idxs']): return
+        self._maybe_merge(group)
     def _maybe_merge(self, group):
-        """a cycle of a multi-emulator run finished -> start the next repeat cycle, or (last cycle) merge videos per slot."""
+        """every emulator of a multi-run finished all its cycles -> merge the group's videos per slot (background)."""
         g = self.groups.get(group or '')
         if not g or g['merged']: return
         if any(self._alive(self.jobs.get(i)) and self.jobs[i].get('group') == group for i in g['idxs']): return
-        if g.get('cycle', 1) < g.get('cycles', 1):            # more repeat cycles to go -> relaunch the same emulators
-            if g['cycles'] > 1: self.log(f'--- {group}：第 {g["cycle"]}/{g["cycles"]} 輪完成 ---')
-            self._run_cycle(group); return
         g['merged'] = True; self.log(f'--- {group}：全部錄完，合併同一款的影片並產生統計報告（每小時影片約 2 分鐘）---')
         def work():
             p = subprocess.Popen([PY, '-u', '-m', 'core.analyze', '--group', group, '--app', g['app']], cwd=ROOT, stdout=subprocess.PIPE,
