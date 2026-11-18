@@ -9,8 +9,8 @@ DEFAULTS = {
     'serial': 'emulator-5554',                   # adb serial of that instance
     'adb': '', 'scrcpy': '', 'ffmpeg': '', 'ffprobe': '',   # empty = auto-detect
     'video_dir': 'videos',
-    'max_fps': 30, 'bitrate': '6M',
-    'spin_interval': 1.5,
+    'max_fps': 30, 'bitrate': '3M',             # 3M ~0.6 GB/hr、OCR 仍精準(6M ~1.2 GB/hr);老虎機實際有效碼率才 ~1.4 Mbps
+    'spin_interval': 0.25,                        # 連續快速點擊(滾動中點 SPIN=快速停止);新環境打包預設也用 0.25,不靠本機 config.json
 }
 
 def load():
