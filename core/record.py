@@ -186,6 +186,10 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
     prev_sig = None; same_since = None; popup_times = []; last_reset_t = None; centre_taps = 0
     span = {}                                                  # current off-game span (video time + what was done)
     rep = {'x': (None, 0), 'spin': 0, 'ocr': (None, 0), 'skip': set()}
+    feat = {'on': False, 'xy': None}                           # off-game win-celebration / feature -> keep tapping (fast loop) to skip it
+    bal_ref = {'val': None, 't': 0.0}                          # last time the balance meter changed -> reels not resolving = feature / long win
+    dims = {'w': 0, 'h': 0}                                     # last grabbed frame size -> screen centre for skip taps
+    FEAT_SKIP_S = float(os.environ.get('SLOTREC_FEAT_SKIP_S') or CFG.get('feat_skip_s', 6))   # in-game but balance frozen this long -> tap centre to skip feature animation
     def reset_rep(): rep.update(x=(None, 0), spin=0, ocr=(None, 0), skip=set())
     def close_span():
         nonlocal span
@@ -218,7 +222,8 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                     now = time.time()
                     ig = app.in_game(im)
                     if live and ig and off_since is None:
-                        live.add(vt(), read_bal(im)); last_live = now
+                        _b = read_bal(im); live.add(vt(), _b); last_live = now
+                        if _b is not None and (bal_ref['val'] is None or _b != bal_ref['val']): bal_ref['val'] = _b; bal_ref['t'] = now
 
                     # ---- out of coins: template, or balance meter below N bets (checked once a minute while in game)
                     poor = False
@@ -263,10 +268,10 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                         if d.IDX != st['emulator']: st.setdefault('emulators', [st['emulator']]).append(d.IDX); st['emulator'] = d.IDX
                         st['bet'] = app.min_bet() or st['bet']; start_seg(secs - recorded())
                         if live: live.boundary(vt())
-                        off_since = same_since = prev_sig = None; reset_rep(); last_chk = time.time(); status('game', True)
+                        off_since = same_since = prev_sig = None; reset_rep(); last_chk = time.time(); bal_ref['val'], bal_ref['t'] = None, 0.0; status('game', True)
                         continue
 
-                    H, W = im.shape[:2]
+                    H, W = im.shape[:2]; dims['w'], dims['h'] = W, H
                     sig = signature(im)
                     same_since = None if changed(prev_sig, sig) else (same_since or now)
                     prev_sig = sig
@@ -285,20 +290,20 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                             off_since = now; span = {'vt0': vt()}; snap('stall' if ig else 'off', im)
                             if ig: st['stalls'] += 1; log('stall: in game but screen frozen 30s')
                         if frozen >= 30: span['frozen'] = max(span.get('frozen', 0), int(frozen))
-                        dur = now - off_since; st['offgame_s'] += 5
+                        dur = now - off_since; st['offgame_s'] += 5; feat['on'] = False   # re-enabled only by the celebration/feature branch below
                         status('stuck' if (frozen >= 30 or dur > 60) else 'popup')
                         if dur > 420 or back_streak >= 3:
                             esc(f'restart app (off {int(dur)}s, backs {back_streak})', im)
                             app.restart(); st['restarts'] += 1; back_streak = 0; centre_taps = 0; reset_rep()
                             if app.enter_slot(slot_id): st['bet'] = app.min_bet() or st['bet']
-                            off_since = same_since = None; close_span()
+                            off_since = same_since = None; bal_ref['val'], bal_ref['t'] = None, 0.0; close_span()
                         elif frozen >= 45 or (dur > 240 and int(dur) % 60 < 5) or (centre_taps >= 10 and dur >= 120):
                             esc(f'BACK (frozen {int(frozen)}s, off {int(dur)}s, centre taps {centre_taps})', im)
                             d.back(); st['backs'] += 1; back_streak += 1; same_since = None; centre_taps = 0
                         elif app.is_lobby(im):
                             log('in lobby -> re-enter'); st['reenter'] += 1; span['lobby'] = 1; status('lobby')
                             if app.enter_slot(slot_id):
-                                st['bet'] = app.min_bet() or st['bet']; off_since = None; reset_rep(); close_span()
+                                st['bet'] = app.min_bet() or st['bet']; off_since = None; reset_rep(); bal_ref['val'], bal_ref['t'] = None, 0.0; close_span()
                             else: esc('re-enter failed', im)
                         else:
                             if rep['ocr'][1] >= 3: rep['skip'].add(rep['ocr'][0])   # tapped 3x, no effect -> skip until back in game
@@ -322,9 +327,10 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                                 tapev('ocr', ob[1])
                             elif dur > 10 and ocr.LAST_DANGER:            # price / BUY page without a NO-THANKS button
                                 d.back(); st['backs'] += 1; back_streak += 1; log('purchase-like page -> BACK (no centre tap)')
-                            elif dur > 10 and (H > W or p.get('centre_tap_landscape')):
+                            elif dur > 4 and (H > W or p.get('centre_tap_landscape')) and not ocr.LAST_DANGER:
+                                feat['xy'] = (W // 2, H // 2); feat['on'] = True   # celebration/feature: fast loop below spams this to skip it
                                 d.tap(W // 2, H // 2); centre_taps += 1; span['centre'] = span.get('centre', 0) + 1
-                                log('tap centre (off >10s)')
+                                log('tap centre (off, feature/celebration -> fast tapping)')
                         popup_times = [t for t in popup_times if now - t < 120]
                         if len(popup_times) >= 6: esc(f'popup storm: {len(popup_times)} in 2 min', im); popup_times.clear()
                     if now - last_snap >= 600: last_snap = now; snap('t', im)
@@ -352,12 +358,23 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                     st['errors'] += 1; log('check step failed:', repr(e))
                     if st['errors'] > 100: raise
             if off_since is None:
-                if live and time.time() - last_live >= READ_EVERY_S:   # balance before a spin -> live statistics
-                    try: live.add(vt(), read_bal(d.grab()))
+                now2 = time.time()
+                if live and now2 - last_live >= READ_EVERY_S:   # balance before a spin -> live statistics
+                    try:
+                        _b = read_bal(d.grab()); live.add(vt(), _b)
+                        if _b is not None and (bal_ref['val'] is None or _b != bal_ref['val']): bal_ref['val'] = _b; bal_ref['t'] = now2
                     except StopRequested: raise
                     except Exception: pass
-                    last_live = time.time()
+                    last_live = now2
+                if dims['w'] and bal_ref['t'] and now2 - bal_ref['t'] > FEAT_SKIP_S:   # in game but balance frozen -> feature / long win animation: tap centre to skip it
+                    try: d.tap(dims['w'] // 2, dims['h'] // 2); st['anim_taps'] = st.get('anim_taps', 0) + 1
+                    except StopRequested: raise
+                    except Exception: pass
                 d.tap(*app.lay()['spin_xy']); st['spins'] += 1
+            elif feat['on'] and feat['xy']:                            # win celebration / feature: keep tapping to skip it (no per-game design)
+                try: d.tap(*feat['xy']); st['feat_taps'] = st.get('feat_taps', 0) + 1
+                except StopRequested: raise
+                except Exception: pass
             time.sleep(interval)
     except StopRequested:
         log('STOP requested'); st['stopped'] = True
