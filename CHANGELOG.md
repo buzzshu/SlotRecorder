@@ -3,6 +3,12 @@
 版號規則：`主版.次版.修正`。新功能 → 次版 +1；只修 bug → 修正 +1。
 版號寫在 `core/version.py`，GUI 標題列、log、打包檔名都會顯示。
 
+## 1.9.9 — 2026-11-19
+- **進場導航卡在 jackpot / pick 獎局也能自動脫困**:原本掃格只在「錄製迴圈」裡跑;若一輪錄滿時剛好停在 jackpot pick 畫面,
+  下一輪的進場導航(`to_lobby`)遇到它只會按 BACK(關不掉)→ 無限 BACK/restart 迴圈卡死(多台循環錄製時實際踩到)。
+  改成:`to_lobby` 卡在「非大廳、非遊戲、找不到彈窗、BACK 無效」的畫面時,先做一輪**完整掃格**(4×5 網格把每格點過)
+  把 pick/jackpot 獎局點穿,點不穿才 restart(最多 3 輪掃格後才升級,仍 bounded)。與錄製中的掃格同一套邏輯。
+
 ## 1.9.8 — 2026-11-19
 - **同事不用隨身碟,線上一鍵更新(git 自更新)**:工具改放私有 GitHub repo,**只放程式碼**(`.gitignore` 排除
   videos/logs/config.json/apk_cache/python/tools)→ `git pull` 只有幾 KB,**不會動到同事的錄影、設定、模擬器 app**。

@@ -174,7 +174,7 @@ class App:
         """dismiss popups until the clean lobby shows. Waits instead of BACK while the screen is still changing
         (asset download / loading). The same action 4x in a row -> BACK instead."""
         ok = 0; t0 = time.time(); prev = None; waits = 0; last_act = None; same_act = 0; exit_tries = 0; skip_labels = set()
-        last_sig = None; restarted = False
+        last_sig = None; restarted = False; sweep_bursts = 0
         for _ in range(max_steps):
             if time.time() - t0 > max_s: break
             check_stop()
@@ -206,6 +206,12 @@ class App:
             if m and same_act >= 2:                                   # text button tapped 3x without effect -> try others
                 skip_labels.add(m.group(1)); log(f'"{m.group(1)}" has no effect -> try other buttons'); same_act = 0
             log('popup:', act); time.sleep(3)
+            if key == 'BACK' and same_act >= 4 and sweep_bursts < 3:   # BACK isn't clearing it -> a pick / jackpot bonus (點鑽石湊三個) needs TAPS, not BACK: sweep every cell
+                log(f'stuck non-lobby screen -> sweep all cells (pick/jackpot bonus?) burst {sweep_bursts + 1}/3')
+                for yy in (0.28, 0.40, 0.52, 0.64, 0.76):
+                    for xx in (0.20, 0.40, 0.60, 0.80):
+                        d.tap(int(im.shape[1] * xx), int(im.shape[0] * yy)); time.sleep(0.4)
+                sweep_bursts += 1; same_act = 0; last_act = last_sig = prev = None; continue   # re-evaluate; if the bonus cleared we reach lobby/game next loop
             if key == 'BACK' and same_act >= 9 and restart_ok and not restarted:   # BACK does nothing here -> start the app fresh (once)
                 log('BACK x10 on an unchanged screen -> restart app'); self.restart(); restarted = True
                 same_act = 0; skip_labels.clear(); last_act = last_sig = prev = None; waits = 0
