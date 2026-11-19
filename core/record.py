@@ -17,7 +17,9 @@ cheap taps can never starve them; every tap-type step has a repeat limit:
   known button template .............. tap   (skip after 3 same)
   lit SPIN under an overlay .......... tap   (skip after 3 in a row)
   OCR safe button .................... tap   (skip after 3 same; never on pages showing $/BUY/UNLOCK/...)
-  off >10 s (portrait games) ......... tap screen centre
+  off >4 s / in-game balance frozen .. sweep-tap a grid over the play area: skips win/feature animations AND reveals
+                                       every cell of a pick / jackpot bonus (點鑽石湊三個同款) so it resolves, instead
+                                       of stalling on a screen that needs taps (fast loop keeps sweeping every spin_interval)
 
 Output next to the video: _stats.json (counters, timeline of off-game spans with video timestamps, bet),
 _timeline.csv, _clean.mp4 (long stuck spans cut out; original kept), then core.analyze runs in the background.
@@ -186,10 +188,20 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
     prev_sig = None; same_since = None; popup_times = []; last_reset_t = None; centre_taps = 0
     span = {}                                                  # current off-game span (video time + what was done)
     rep = {'x': (None, 0), 'spin': 0, 'ocr': (None, 0), 'skip': set()}
-    feat = {'on': False, 'xy': None}                           # off-game win-celebration / feature -> keep tapping (fast loop) to skip it
+    feat = {'on': False}                                       # off-game win-celebration / feature / pick bonus -> keep sweeping (fast loop) to skip / resolve it
     bal_ref = {'val': None, 't': 0.0}                          # last time the balance meter changed -> reels not resolving = feature / long win
-    dims = {'w': 0, 'h': 0}                                     # last grabbed frame size -> screen centre for skip taps
-    FEAT_SKIP_S = float(os.environ.get('SLOTREC_FEAT_SKIP_S') or CFG.get('feat_skip_s', 6))   # in-game but balance frozen this long -> tap centre to skip feature animation
+    dims = {'w': 0, 'h': 0}                                     # last grabbed frame size -> screen coords for skip taps
+    FEAT_SKIP_S = float(os.environ.get('SLOTREC_FEAT_SKIP_S') or CFG.get('feat_skip_s', 6))   # in-game but balance frozen this long -> sweep-tap to skip feature animation
+    sweep = {'i': 0}                                            # rotating grid index for skip taps
+    def skip_tap(W, H):
+        """tap a point from a rotating grid over the central play area. A fixed centre tap only skips animations; a
+        pick / jackpot bonus (點鑽石湊三個同款才結束) needs EVERY cell tapped or it stalls with no input -> sweep a grid
+        so successive taps reveal different cells and the bonus resolves. Harmless to celebrations / Hold&Spin (any tap
+        skips them). Grid avoids the top close-X band and the bottom bet bar, so it won't close popups early or change bet."""
+        xs = (0.20, 0.40, 0.60, 0.80); ys = (0.28, 0.40, 0.52, 0.64, 0.76)
+        k = sweep['i'] % (len(xs) * len(ys)); sweep['i'] += 1
+        x = int(W * xs[k % len(xs)]); y = int(H * ys[k // len(xs)])
+        d.tap(x, y); return x, y
     def reset_rep(): rep.update(x=(None, 0), spin=0, ocr=(None, 0), skip=set())
     def close_span():
         nonlocal span
@@ -328,9 +340,9 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                             elif dur > 10 and ocr.LAST_DANGER:            # price / BUY page without a NO-THANKS button
                                 d.back(); st['backs'] += 1; back_streak += 1; log('purchase-like page -> BACK (no centre tap)')
                             elif dur > 4 and (H > W or p.get('centre_tap_landscape')) and not ocr.LAST_DANGER:
-                                feat['xy'] = (W // 2, H // 2); feat['on'] = True   # celebration/feature: fast loop below spams this to skip it
-                                d.tap(W // 2, H // 2); centre_taps += 1; span['centre'] = span.get('centre', 0) + 1
-                                log('tap centre (off, feature/celebration -> fast tapping)')
+                                feat['on'] = True              # celebration / feature / pick bonus: fast loop below keeps sweeping to skip / resolve it
+                                sx, sy = skip_tap(W, H); centre_taps += 1; span['centre'] = span.get('centre', 0) + 1
+                                log('tap skip-sweep (off, feature/celebration/pick-bonus -> fast tapping)', (sx, sy))
                         popup_times = [t for t in popup_times if now - t < 120]
                         if len(popup_times) >= 6: esc(f'popup storm: {len(popup_times)} in 2 min', im); popup_times.clear()
                     if now - last_snap >= 600: last_snap = now; snap('t', im)
@@ -366,13 +378,13 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                     except StopRequested: raise
                     except Exception: pass
                     last_live = now2
-                if dims['w'] and bal_ref['t'] and now2 - bal_ref['t'] > FEAT_SKIP_S:   # in game but balance frozen -> feature / long win animation: tap centre to skip it
-                    try: d.tap(dims['w'] // 2, dims['h'] // 2); st['anim_taps'] = st.get('anim_taps', 0) + 1
+                if dims['w'] and bal_ref['t'] and now2 - bal_ref['t'] > FEAT_SKIP_S:   # in game but balance frozen -> feature / long win animation / pick bonus: sweep-tap to skip / resolve it
+                    try: skip_tap(dims['w'], dims['h']); st['anim_taps'] = st.get('anim_taps', 0) + 1
                     except StopRequested: raise
                     except Exception: pass
                 d.tap(*app.lay()['spin_xy']); st['spins'] += 1
-            elif feat['on'] and feat['xy']:                            # win celebration / feature: keep tapping to skip it (no per-game design)
-                try: d.tap(*feat['xy']); st['feat_taps'] = st.get('feat_taps', 0) + 1
+            elif feat['on'] and dims['w']:                             # win celebration / feature / pick bonus: keep sweeping to skip / resolve it (no per-game design)
+                try: skip_tap(dims['w'], dims['h']); st['feat_taps'] = st.get('feat_taps', 0) + 1
                 except StopRequested: raise
                 except Exception: pass
             time.sleep(interval)

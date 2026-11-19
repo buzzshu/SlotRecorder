@@ -343,7 +343,7 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
         'top_wins': [{'time': hms(spins[i]['t']), 'win': float(wins[i]), 'x': float(mult[i])} for i in top if wins[i] > 0],
         'gifts': [{'time': hms(t), 'coins': c} for t, c in gifts], 'jumps': [{'time': hms(t), 'coins': c, 'why': w} for t, c, w in jumps],
         'multi_spin_steps': len(odd),
-        'features': dict(feature_summary(feats, n, tot_bet, feature_gap(spins)), list=[{'time': hms(f['t0']), 'seconds': f['seconds'], 'win': f['win'],
+        'features': dict(feature_summary(feats, n, tot_bet, feature_gap(spins)), list=[{'time': hms(f['t0']), 'spin': f['spin'], 'seconds': f['seconds'], 'win': f['win'],
                                                                    'x': f['x'], 'clip': f.get('clip')} for f in feats]),
         'balance_first': vals[0][1] if vals else None, 'balance_last': vals[-1][1] if vals else None,
         'meter_read_rate': round(read_ok, 3), 'analysis_seconds': round(time.time() - t_start),
@@ -356,6 +356,9 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
             f.write(f"{i}\t{hms(s['t'])}\t{s['t']:.1f}\t{s['bet']}\t{s['win']:.0f}\t{s['win'] / bet:.2f}\t{s['bal']}\n")
     with open(base + '_summary.json', 'w', encoding='utf-8') as f: json.dump(summary, f, indent=1, ensure_ascii=False)
     with open(base + '_summary.html', 'w', encoding='utf-8') as f: f.write(render_html(summary))
+    try:                                                     # per-spin handoff for a downstream board recognizer (slot-video-recog / te-ldplayer)
+        from .handoff import build as _handoff; _handoff(mp4, say)
+    except Exception as e: say(f'handoff not made: {e!r}')
     _pdf(base + '_summary.html', say)
     say(f'spins {n}  RTP {rtp:.1%} ({lo and f"{lo:.0%}"}~{hi and f"{hi:.0%}"})  hit 1/{summary["hit_every_n"]}  '
         f'bet {bet:,}  read {read_ok:.0%}  -> {os.path.basename(base)}_summary.html')

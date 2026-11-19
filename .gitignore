@@ -1,15 +1,29 @@
-# machine-local / generated - never committed, never packed
+# SlotRecorder git repo = CODE ONLY. Everything big or machine-local stays out, so a colleague's
+# `git pull` is a few KB and never touches their recordings, settings, APKs or bundled runtime.
+
+# recordings / analysis output / logs
 videos/
 logs/
-apk_cache/
-python/
-tools/
+catalog/
+
+# machine-local settings & flags (pack.py already skips these; git must too)
 config.json
 python_dir.txt
 STOP
 STOP_*
+
+# bundled runtime & binaries — colleagues get these once via the bootstrap package, not via updates
+python/
+tools/
+apk_cache/
+
+# build artifacts
+*.zip
 __pycache__/
 *.pyc
 *.bak
-*.zip
-apps/*/catalog/
+
+# the ONLY secret-bearing file: it writes the read-only token into the LOCAL .git/config and is
+# distributed once with the bootstrap package. It must never be committed.
+setup_git.bat
+.update_token
