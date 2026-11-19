@@ -23,7 +23,7 @@ __pycache__/
 *.pyc
 *.bak
 
-# the ONLY secret-bearing file: it writes the read-only token into the LOCAL .git/config and is
-# distributed once with the bootstrap package. It must never be committed.
+# one-time bootstrap script, delivered with the zip (repo is public -> no token inside). Kept out of
+# the repo so it stays the machine-local bootstrap, not a tracked file.
 setup_git.bat
 .update_token
