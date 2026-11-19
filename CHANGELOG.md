@@ -3,6 +3,14 @@
 版號規則：`主版.次版.修正`。新功能 → 次版 +1；只修 bug → 修正 +1。
 版號寫在 `core/version.py`，GUI 標題列、log、打包檔名都會顯示。
 
+## 1.9.8 — 2026-11-19
+- **同事不用隨身碟,線上一鍵更新(git 自更新)**:工具改放私有 GitHub repo,**只放程式碼**(`.gitignore` 排除
+  videos/logs/config.json/apk_cache/python/tools)→ `git pull` 只有幾 KB,**不會動到同事的錄影、設定、模擬器 app**。
+  GUI 右上多一顆「檢查更新」:開啟時背景比對遠端版本,有新版就顯示「★ 有更新 vX」,按下去 `git pull --ff-only` 後提示重開。
+  也可跑 `update.bat`。同事第一次跑一次 `setup_git.bat`(把資料夾接上更新庫,唯讀金鑰只寫進本機 `.git/config`、不進 repo)。
+  管理者改版流程見 `UPDATE.md`。新增 `core/update.py`、`update.bat`、`setup_git.bat`(範本)、`UPDATE.md`。
+  APK/bootstrap 大檔仍走一次性(Play/主更新台),只有程式碼走 git
+
 ## 1.9.7 — 2026-11-18
 - **選物 / jackpot 獎局(點鑽石湊三個同款才結束)也能自動跑完,不卡死**:這類獎局要「點畫面上的格子」才會進行,
   原本的「連點中央」只會重複點同一格、永遠湊不到三個 → 卡在那邊。改成**掃格點**:卡住時輪流點一個覆蓋中央遊玩區的

@@ -54,6 +54,8 @@ class Gui(tk.Tk):
         for text, cmd in (('環境檢查', self._env_check), ('看畫面', self._preview), ('準備模擬器', self._prepare_emu),
                           ('設定', self._settings), ('打包帶走', self._pack)):
             ttk.Button(top, text=text, command=cmd).pack(side='left', padx=2)
+        self.btn_update = ttk.Button(top, text='檢查更新', command=self._update); self.btn_update.pack(side='left', padx=2)
+        self.after(3000, self._check_update_async)           # background: is there a newer version in the git repo?
         self.status = ttk.Label(top, text='待命', foreground='#555'); self.status.pack(side='right')
 
         body = ttk.PanedWindow(self, orient='horizontal'); body.pack(fill='both', expand=True, padx=8, pady=(0, 8))
@@ -217,6 +219,56 @@ class Gui(tk.Tk):
         return False
 
     # ---------------- environment ----------------
+    # ---------------- self-update over git (code only; see UPDATE.md) ----------------
+    def _check_update_async(self):
+        """startup: is there a newer version in the repo? updates the button label, never blocks the UI."""
+        def work():
+            try:
+                from core import update
+                r = update.check_update()
+            except Exception:
+                r = ('err', VERSION, None)
+            self.after(0, lambda: self._set_update_btn(*r))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _set_update_btn(self, st, lo, rv):
+        self._upd = (st, lo, rv)
+        txt = {'update': f'★ 有更新 v{rv}', 'current': f'已是最新 v{lo}', 'not_repo': '更新：需先設定',
+               'offline': '檢查更新', 'no_git': '更新：需裝 git', 'err': '檢查更新'}.get(st, '檢查更新')
+        try: self.btn_update.config(text=txt)
+        except Exception: pass
+
+    def _update(self):
+        from core import update
+        st, lo, rv = getattr(self, '_upd', (None, VERSION, None))
+        if st in (None, 'offline', 'err'):                    # not checked yet / was offline -> check now
+            st, lo, rv = update.check_update(); self._set_update_btn(st, lo, rv)
+        if st == 'no_git':
+            messagebox.showinfo('更新', '這台電腦沒有 git。請先安裝 Git for Windows：\nhttps://git-scm.com/download/win'); return
+        if st == 'not_repo':
+            messagebox.showinfo('更新', '這份還沒接上更新庫。\n請先在工具資料夾裡跑一次 setup_git.bat，之後就能一鍵更新。'); return
+        if st == 'offline':
+            messagebox.showwarning('更新', '連不上更新庫（檢查網路 / 金鑰是否有效）。'); return
+        if st == 'current':
+            messagebox.showinfo('更新', f'已是最新版 v{lo}。'); return
+        if st != 'update':
+            return
+        if not messagebox.askyesno('更新', f'目前 v{lo}，有新版 v{rv}。\n現在更新嗎？（只更新程式碼，不會動到你的錄影與設定）'): return
+        self.btn_update.config(text='更新中…', state='disabled')
+        def work():
+            ok, msg = update.do_update()
+            self.after(0, lambda: self._update_done(ok, msg))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_done(self, ok, msg):
+        self.btn_update.config(state='normal')
+        if ok:
+            self.btn_update.config(text='更新完成，請重開')
+            messagebox.showinfo('更新完成', '更新完成。請關閉並重新開啟 SlotRecorder 讓新版生效。')
+        else:
+            self.btn_update.config(text='★ 有更新')
+            messagebox.showerror('更新失敗', msg)
+
     def _env_check(self):
         idx = self.emu(); a = self.app(); self.log(f'--- 環境檢查（SlotRecorder v{VERSION}，模擬器 {self.emu_name(idx)}）---')
         def work():
