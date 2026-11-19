@@ -174,7 +174,7 @@ class App:
         """dismiss popups until the clean lobby shows. Waits instead of BACK while the screen is still changing
         (asset download / loading). The same action 4x in a row -> BACK instead."""
         ok = 0; t0 = time.time(); prev = None; waits = 0; last_act = None; same_act = 0; exit_tries = 0; skip_labels = set()
-        last_sig = None; restarted = False; sweep_bursts = 0
+        last_sig = None; restarted = False; sweep_bursts = 0; burn_spins = 0
         for _ in range(max_steps):
             if time.time() - t0 > max_s: break
             check_stop()
@@ -195,6 +195,10 @@ class App:
             imwrite(os.path.join(self.shots, f'pop_{time.strftime("%H%M%S")}.png'), im)
             act = self.dismiss_once(im, allow_back=False, exclude=skip_labels) if same_act < 4 else None
             if act is None:
+                if moving and self.in_game(im) and burn_spins < 40:   # a feature / free-spins is ANIMATING inside a slot -> tap SPIN to finish it, don't just wait (否則特色只靠遊戲慢速自走,進場卡很久才靠 restart 逃生)
+                    burn_spins += 1; d.tap(*(self.lay().get('spin_xy') or (im.shape[1] // 2, int(im.shape[0] * 0.96))))
+                    if burn_spins % 8 == 1: log(f'feature animating during entry -> tap SPIN to finish it ({burn_spins}/40)')
+                    time.sleep(1.5); continue
                 if moving and waits < 6:
                     waits += 1; log('screen changing (loading?) -> wait'); time.sleep(5); continue
                 d.back(); act = 'BACK'
