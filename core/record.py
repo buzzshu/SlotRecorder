@@ -192,6 +192,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
     bal_ref = {'val': None, 't': 0.0}                          # last time the balance meter changed -> reels not resolving = feature / long win
     dims = {'w': 0, 'h': 0}                                     # last grabbed frame size -> screen coords for skip taps
     FEAT_SKIP_S = float(os.environ.get('SLOTREC_FEAT_SKIP_S') or CFG.get('feat_skip_s', 6))   # in-game but balance frozen this long -> sweep-tap to skip feature animation
+    FEAT_TAP_S = float(os.environ.get('SLOTREC_FEAT_TAP_S') or CFG.get('feat_tap_s', 0.1))     # during a feature / pick -> shorter sleep so it finishes fast (base game keeps `interval`)
     sweep = {'i': 0}                                            # rotating grid index for skip taps
     def skip_tap(W, H):
         """tap a point from a rotating grid over the play area. A fixed centre tap only skips animations; a
@@ -371,6 +372,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                 except Exception as e:
                     st['errors'] += 1; log('check step failed:', repr(e))
                     if st['errors'] > 100: raise
+            in_feature = False                                        # balance frozen (feature / Hold&Spin / pick) -> tap faster to finish it
             if off_since is None:
                 now2 = time.time()
                 if live and now2 - last_live >= READ_EVERY_S:   # balance before a spin -> live statistics
@@ -381,15 +383,17 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                     except Exception: pass
                     last_live = now2
                 if dims['w'] and bal_ref['t'] and now2 - bal_ref['t'] > FEAT_SKIP_S:   # in game but balance frozen -> feature / long win animation / pick bonus: sweep-tap to skip / resolve it
+                    in_feature = True
                     try: skip_tap(dims['w'], dims['h']); st['anim_taps'] = st.get('anim_taps', 0) + 1
                     except StopRequested: raise
                     except Exception: pass
                 d.tap(*app.lay()['spin_xy']); st['spins'] += 1
             elif feat['on'] and dims['w']:                             # win celebration / feature / pick bonus: keep sweeping to skip / resolve it (no per-game design)
+                in_feature = True
                 try: skip_tap(dims['w'], dims['h']); st['feat_taps'] = st.get('feat_taps', 0) + 1
                 except StopRequested: raise
                 except Exception: pass
-            time.sleep(interval)
+            time.sleep(FEAT_TAP_S if in_feature else interval)        # feature / pick: tap ~0.1s apart to finish it fast; base game keeps the normal 0.25s
     except StopRequested:
         log('STOP requested'); st['stopped'] = True
     except BaseException as e:
