@@ -194,11 +194,13 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
     FEAT_SKIP_S = float(os.environ.get('SLOTREC_FEAT_SKIP_S') or CFG.get('feat_skip_s', 6))   # in-game but balance frozen this long -> sweep-tap to skip feature animation
     sweep = {'i': 0}                                            # rotating grid index for skip taps
     def skip_tap(W, H):
-        """tap a point from a rotating grid over the central play area. A fixed centre tap only skips animations; a
+        """tap a point from a rotating grid over the play area. A fixed centre tap only skips animations; a
         pick / jackpot bonus (點鑽石湊三個同款才結束) needs EVERY cell tapped or it stalls with no input -> sweep a grid
         so successive taps reveal different cells and the bonus resolves. Harmless to celebrations / Hold&Spin (any tap
-        skips them). Grid avoids the top close-X band and the bottom bet bar, so it won't close popups early or change bet."""
-        xs = (0.20, 0.40, 0.60, 0.80); ys = (0.28, 0.40, 0.52, 0.64, 0.76)
+        skips them). xs/ys match the 5-col reel + the jackpot pick board (3 lower rows); y stops at 0.83 (above the bet
+        bar at ~0.88) so it never changes the bet. The old grid stopped at y 0.76 and MISSED the pick board -> left the
+        jackpot pick stuck (2026-11-19)."""
+        xs = (0.18, 0.34, 0.50, 0.66, 0.82); ys = (0.30, 0.45, 0.58, 0.67, 0.75, 0.83)
         k = sweep['i'] % (len(xs) * len(ys)); sweep['i'] += 1
         x = int(W * xs[k % len(xs)]); y = int(H * ys[k // len(xs)])
         d.tap(x, y); return x, y

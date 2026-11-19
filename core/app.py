@@ -208,8 +208,8 @@ class App:
             log('popup:', act); time.sleep(3)
             if key == 'BACK' and same_act >= 4 and sweep_bursts < 3:   # BACK isn't clearing it -> a pick / jackpot bonus (點鑽石湊三個) needs TAPS, not BACK: sweep every cell
                 log(f'stuck non-lobby screen -> sweep all cells (pick/jackpot bonus?) burst {sweep_bursts + 1}/3')
-                for yy in (0.28, 0.40, 0.52, 0.64, 0.76):
-                    for xx in (0.20, 0.40, 0.60, 0.80):
+                for yy in (0.30, 0.45, 0.58, 0.67, 0.75, 0.83):       # 下三排 = jackpot pick 盤面(y 停在 0.83,押注列 0.88+ 之上)
+                    for xx in (0.18, 0.34, 0.50, 0.66, 0.82):
                         d.tap(int(im.shape[1] * xx), int(im.shape[0] * yy)); time.sleep(0.4)
                 sweep_bursts += 1; same_act = 0; last_act = last_sig = prev = None; continue   # re-evaluate; if the bonus cleared we reach lobby/game next loop
             if key == 'BACK' and same_act >= 9 and restart_ok and not restarted:   # BACK does nothing here -> start the app fresh (once)
