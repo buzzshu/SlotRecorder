@@ -33,7 +33,8 @@ class Gui(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f'SlotRecorder v{VERSION} — 自動錄製 slot 影片')
-        self.geometry('1250x760'); self.minsize(1000, 600)
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()         # open relative to the screen so the window is never taller than the display
+        self.geometry(f'{min(1250, sw - 80)}x{min(820, sh - 120)}'); self.minsize(900, 520)
         self.q = queue.Queue(); self.apps = list_apps(); self.jobs = {}     # emulator index -> job dict
         self.groups = {}                                                    # multi-emulator run id -> {'app', 'idxs', 'merged'}
         self.devlock = threading.Lock()
@@ -63,7 +64,7 @@ class Gui(tk.Tk):
         # shared message / progress log pinned to the bottom (visible whichever tab is open)
         logf = ttk.Frame(self, padding=(8, 0)); logf.pack(side='bottom', fill='x')
         ttk.Label(logf, text='訊息 / 進度').pack(anchor='w')
-        self.logbox = tk.Text(logf, height=9, wrap='none', font=('Consolas', 9))
+        self.logbox = tk.Text(logf, height=7, wrap='none', font=('Consolas', 9))
         sb = ttk.Scrollbar(logf, command=self.logbox.yview); self.logbox.configure(yscrollcommand=sb.set)
         sb.pack(side='right', fill='y'); self.logbox.pack(fill='x', pady=(2, 8))
 
@@ -72,14 +73,19 @@ class Gui(tk.Tk):
         rep = ttk.Frame(nb, padding=6); nb.add(rep, text='  分析 / 報告  ')
 
         # ---- 錄製 tab: pick games -> record -> watch jobs ----
-        ttk.Label(rec, text='Slot 清單（點一下選要錄的遊戲、雙擊「名稱」「分鐘」修改；新增 / 刪除 / 掃描大廳在上方「遊戲清單」選單）').pack(anchor='w')
-        flt = ttk.Frame(rec); flt.pack(fill='x', pady=(2, 2))
+        # grid layout so the list and the job-status table SHARE the vertical space and shrink with the window
+        # (each has its own scrollbar); the buttons / labels / progress keep their size and never get clipped.
+        rec.columnconfigure(0, weight=1)
+        rec.rowconfigure(2, weight=3)      # game list: takes the most room, shrinks first
+        rec.rowconfigure(5, weight=1)      # job-status table: also flexes, so it's never pushed off-screen
+        ttk.Label(rec, text='Slot 清單（點一下選要錄的遊戲、雙擊「名稱」「分鐘」修改；新增 / 刪除 / 掃描大廳在上方「遊戲清單」選單）').grid(row=0, column=0, sticky='w')
+        flt = ttk.Frame(rec); flt.grid(row=1, column=0, sticky='ew', pady=(2, 2))
         ttk.Label(flt, text='搜尋：').pack(side='left')
         self.q_var = tk.StringVar(); self.q_var.trace_add('write', lambda *a: self._filter())
         ttk.Entry(flt, textvariable=self.q_var, width=22).pack(side='left')
         self.count_lbl = ttk.Label(flt, text='', foreground='#555'); self.count_lbl.pack(side='right')
-        tf = ttk.Frame(rec); tf.pack(fill='both', expand=True)
-        self.tree = ttk.Treeview(tf, columns=('name', 'min', 'id'), show='headings', height=10, selectmode='browse')
+        tf = ttk.Frame(rec); tf.grid(row=2, column=0, sticky='nsew')
+        self.tree = ttk.Treeview(tf, columns=('name', 'min', 'id'), show='headings', height=6, selectmode='browse')
         for c, t, w in (('name', '名稱', 240), ('min', '分鐘', 50), ('id', '縮圖 id', 120)):
             self.tree.heading(c, text=t); self.tree.column(c, width=w, anchor='center' if c == 'min' else 'w')
         rp = ttk.Frame(tf, width=210); rp.pack(side='right', fill='y'); rp.pack_propagate(False)   # thumbnail lives BESIDE the list, out of the 開始錄製 row's vertical path, so selecting a game never shifts the buttons
@@ -88,7 +94,7 @@ class Gui(tk.Tk):
         tsb.pack(side='right', fill='y'); self.tree.pack(side='left', fill='both', expand=True)
         self.tree.bind('<Double-1>', self._tree_dbl); self.tree.bind('<<TreeviewSelect>>', lambda e: self._show_thumb())
 
-        run = ttk.Frame(rec); run.pack(fill='x', pady=(6, 0))
+        run = ttk.Frame(rec); run.grid(row=3, column=0, sticky='ew', pady=(6, 0))
         self.btn_start = ttk.Button(run, text='▶ 開始錄製', command=self._start); self.btn_start.pack(side='left')
         ttk.Label(run, text=' 同時用').pack(side='left')
         self.n_var = tk.IntVar(value=1)
@@ -102,13 +108,15 @@ class Gui(tk.Tk):
         ttk.Button(run, text='■ 全部停止', command=self._stop_all).pack(side='left')
         ttk.Button(run, text='💸 沒錢了·清除重跑', command=self._reset_now).pack(side='left', padx=(12, 0))
 
-        ttk.Label(rec, text='錄製工作（每台模擬器一列；選一列再按「停止此台」）').pack(anchor='w', pady=(8, 0))
+        ttk.Label(rec, text='錄製工作（每台模擬器一列；選一列再按「停止此台」）').grid(row=4, column=0, sticky='w', pady=(8, 0))
         cols = (('emu', '模擬器', 110), ('app', 'App', 110), ('cur', '目前', 210), ('prog', '進度', 60), ('state', '狀態', 130),
                 ('pop', '彈窗', 50), ('off', '非遊戲', 60), ('live', '即時統計', 190), ('note', '備註', 160))
-        self.jt = ttk.Treeview(rec, columns=[c for c, _, _ in cols], show='headings', height=4)
+        jtf = ttk.Frame(rec); jtf.grid(row=5, column=0, sticky='nsew')
+        self.jt = ttk.Treeview(jtf, columns=[c for c, _, _ in cols], show='headings', height=3)
         for c, t, w in cols: self.jt.heading(c, text=t); self.jt.column(c, width=w, anchor='w')
-        self.jt.pack(fill='x')
-        self.bar = ttk.Progressbar(rec, maximum=100); self.bar.pack(fill='x', pady=(4, 0))
+        jsb = ttk.Scrollbar(jtf, command=self.jt.yview); self.jt.configure(yscrollcommand=jsb.set)
+        jsb.pack(side='right', fill='y'); self.jt.pack(side='left', fill='both', expand=True)
+        self.bar = ttk.Progressbar(rec, maximum=100); self.bar.grid(row=6, column=0, sticky='ew', pady=(4, 0))
 
         # ---- 分析 / 報告 tab ----
         ttk.Label(rep, text='錄完影片後在這裡看結果，報告會自動開啟。', foreground='#555').pack(anchor='w', pady=(2, 10))
