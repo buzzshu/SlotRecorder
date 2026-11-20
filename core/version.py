@@ -1,2 +1,2 @@
 """SlotRecorder version. Bump on every release (see CHANGELOG.md), commit, then `git tag v<VERSION>`."""
-VERSION = '1.11.1'
+VERSION = '1.12.0'

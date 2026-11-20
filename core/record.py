@@ -22,7 +22,8 @@ cheap taps can never starve them; every tap-type step has a repeat limit:
                                        of stalling on a screen that needs taps (fast loop keeps sweeping every spin_interval)
 
 Output next to the video: _stats.json (counters, timeline of off-game spans with video timestamps, bet),
-_timeline.csv, _clean.mp4 (long stuck spans cut out; original kept), then core.analyze runs in the background.
+_timeline.csv (marks stuck/reset spans to skip when reviewing), then core.analyze runs in the background.
+A single-segment recording is renamed into the final .mp4 with no re-write; several segments (account reset) are stitched.
 Machine-readable lines for the GUI:  PROGRESS <recorded>/<total>   STATUS <state> key=value ...
 """
 import argparse, csv, json, math, os, subprocess, sys, time
@@ -149,8 +150,8 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
             try: pr.wait(15)
             except subprocess.TimeoutExpired: pr.kill(); pr.wait(15)
         if not (os.path.exists(path) and os.path.getsize(path) > 0): log('segment empty'); return
-        fixed = path[:-4] + '_fixed.mkv'                       # remux: restores duration/index after a hard stop
-        if ffmpeg('-i', path, '-c', 'copy', fixed) == 0 and os.path.getsize(fixed) > 0: os.remove(path)
+        fixed = path[:-4] + '.mp4'                             # remux straight to mp4 (final container): restores index after a hard stop; a single segment then needs no further merge
+        if ffmpeg('-i', path, '-c', 'copy', fixed) == 0 and os.path.exists(fixed) and os.path.getsize(fixed) > 0: os.remove(path)
         else: fixed = path
         segs.append((fixed, probe(fixed))); log(f'segment closed {segs[-1][1]:.0f}s, total {recorded():.0f}/{secs}s')
 
@@ -429,7 +430,13 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
         st['elapsed_s'] = int(time.time() - t0); st['segments'] = [(os.path.basename(x), round(y, 1)) for x, y in segs]
         mp4 = base + '.mp4'; ok = False
         parts = list(dict.fromkeys(x for x, _ in segs if os.path.exists(x) and os.path.getsize(x) > 0))
-        if parts:
+        if len(parts) == 1 and parts[0].lower().endswith('.mp4'):   # single segment (the common case): already mp4 -> rename, no re-write
+            try: os.replace(parts[0], mp4)
+            except OSError as e: log('rename segment failed, keeping the segment file', repr(e)); mp4 = parts[0]   # file momentarily locked (AV / scrcpy) -> salvage the footage instead of orphaning it
+            if os.path.exists(mp4) and os.path.getsize(mp4) > 0:
+                st['video_s'] = round(probe(mp4), 1)
+                ok = st['video_s'] >= secs * 0.95 or st.get('stopped') == 'precise'
+        elif parts:                                                 # several segments (account reset / scrcpy restart) -> stitch back into one
             lst = base + '_concat.txt'
             with open(lst, 'w', encoding='utf-8') as fh:
                 for x in parts: fh.write("file '" + x.replace(os.sep, '/') + "'\n")
@@ -443,7 +450,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
         st['ok'] = ok; st['file'] = mp4
         if os.path.exists(mp4):
             try: finish_outputs(mp4, st)
-            except Exception as e: log('timeline / clean cut failed', repr(e))
+            except Exception as e: log('timeline write failed', repr(e))
         with open(base + '_stats.json', 'w', encoding='utf-8') as f: json.dump(st, f, indent=1, ensure_ascii=False)
         log('done', 'OK' if ok else 'INCOMPLETE', f"video {st.get('video_s', 0)}s ->", mp4)
         if os.path.exists(mp4) and st.get('video_s', 0) >= 60 and CFG.get('auto_analyze', True):
@@ -477,14 +484,11 @@ def removable(row):
 def finish_outputs(mp4, st):
     base = mp4[:-4]
     with open(base + '_timeline.csv', 'w', newline='', encoding='utf-8-sig') as f:
-        w = csv.writer(f); w.writerow(['start', 'end', 'seconds', 'cut_in_clean', 'what_happened'])
+        w = csv.writer(f); w.writerow(['start', 'end', 'seconds', 'stuck_or_reset', 'what_happened'])
         for a, b, info in st['timeline']: w.writerow([hms(a), hms(b), round(b - a), 'yes' if removable((a, b, info)) else '', info])
         for i, (_, x) in enumerate(st.get('segments', [])[:-1]):
             at = sum(y for _, y in st['segments'][:i+1]); w.writerow([hms(at), hms(at), 0, '', 'segment boundary (account reset / scrcpy restart)'])
-    spans = [(a, b) for a, b, info in st['timeline'] if removable((a, b, info))]
-    out, cut = cut_clean(mp4, spans) if spans else (None, 0)
-    st['clean_file'] = out; st['clean_cut_s'] = round(cut, 1)
-    if out: log(f'clean video: cut {cut:.0f}s of stuck screens -> {os.path.basename(out)}')
+    st['clean_file'] = None; st['clean_cut_s'] = 0          # no _clean.mp4: raw video kept, timeline marks the stuck/reset spans to skip when reviewing
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
