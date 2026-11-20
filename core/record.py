@@ -185,7 +185,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
             if precise: log(f'夠準就停: earlier videos of this game give {len(live.prior)} spins')
         except Exception as e: log('live stats off:', repr(e))
     last_chk = last_snap = last_prog = last_meter = 0; last_betchk = time.time(); off_since = None; back_streak = 0
-    prev_sig = None; same_since = None; popup_times = []; last_reset_t = None; centre_taps = 0
+    prev_sig = None; same_since = None; popup_times = []; last_reset_t = None; centre_taps = 0; bal_stuck_since = None
     span = {}                                                  # current off-game span (video time + what was done)
     rep = {'x': (None, 0), 'spin': 0, 'ocr': (None, 0), 'skip': set()}
     feat = {'on': False}                                       # off-game win-celebration / feature / pick bonus -> keep sweeping (fast loop) to skip / resolve it
@@ -193,6 +193,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
     dims = {'w': 0, 'h': 0}                                     # last grabbed frame size -> screen coords for skip taps
     FEAT_SKIP_S = float(os.environ.get('SLOTREC_FEAT_SKIP_S') or CFG.get('feat_skip_s', 6))   # in-game but balance frozen this long -> sweep-tap to skip feature animation
     FEAT_TAP_S = float(os.environ.get('SLOTREC_FEAT_TAP_S') or CFG.get('feat_tap_s', 0.1))     # during a feature / pick -> shorter sleep so it finishes fast (base game keeps `interval`)
+    STUCK_BAL_S = float(os.environ.get('SLOTREC_STUCK_BAL_S') or CFG.get('stuck_bal_s', 150))  # in-game marker lit + screen animating but balance unchanged this long -> pick/jackpot livelock -> escalate (BACK, then restart)
     sweep = {'i': 0}                                            # rotating grid index for skip taps
     def skip_tap(W, H):
         """tap a point from a rotating grid over the play area. A fixed centre tap only skips animations; a
@@ -285,7 +286,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                         if d.IDX != st['emulator']: st.setdefault('emulators', [st['emulator']]).append(d.IDX); st['emulator'] = d.IDX
                         st['bet'] = app.min_bet() or st['bet']; start_seg(secs - recorded())
                         if live: live.boundary(vt())
-                        off_since = same_since = prev_sig = None; reset_rep(); last_chk = time.time(); bal_ref['val'], bal_ref['t'] = None, 0.0; status('game', True)
+                        off_since = same_since = prev_sig = None; bal_stuck_since = None; reset_rep(); last_chk = time.time(); bal_ref['val'], bal_ref['t'] = None, 0.0; status('game', True)
                         continue
 
                     H, W = im.shape[:2]; dims['w'], dims['h'] = W, H
@@ -294,14 +295,32 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                     prev_sig = sig
                     frozen = 0 if same_since is None else now - same_since
                     if ig: app.lay(im)                                   # portrait or landscape slot -> its button positions
-                    if ig and frozen < 30:
+                    # in-game marker lit, screen still animating (so never counts as 'frozen'), but the balance has not
+                    # moved for a long time: a pick / jackpot bonus the sweep-tap can't resolve -> livelock the stuck
+                    # ladder below would miss (it only runs when off-game or frozen >=30s). Escalate explicitly.
+                    bal_stuck = ig and frozen < 30 and bool(bal_ref['t']) and now - bal_ref['t'] > STUCK_BAL_S
+                    if ig and frozen < 30 and not bal_stuck:
                         if off_since is not None: close_span()
-                        off_since = None; back_streak = 0; centre_taps = 0; reset_rep(); status('game')
+                        off_since = None; back_streak = 0; centre_taps = 0; bal_stuck_since = None; reset_rep(); status('game')
                         if st['bet'] and now - last_betchk >= 600:      # bet drifted (level-up / feature end)? -> back to minimum
                             last_betchk = now; b = app.read_meter(im, 'bet')
                             if b and b != st['bet']:
                                 log(f'bet changed {st["bet"]:,} -> {b:,} -> min bet again'); st['bet_changes'] += 1
                                 st['bet'] = app.min_bet() or st['bet']
+                    elif bal_stuck:                                       # pick/jackpot livelock: BACK a couple of times, then restart the app
+                        if off_since is not None: close_span(); off_since = None   # a brief off-game interlude just before this can leave off_since stale -> clear it so the off-game ladder won't later read a huge bogus dur
+                        if bal_stuck_since is None:
+                            bal_stuck_since = now; st['stalls'] += 1; snap('balstuck', im)
+                            log(f'in game but balance frozen {int(now - bal_ref["t"])}s -> treat as stuck (pick/jackpot?)')
+                        status('stuck')
+                        if back_streak >= 2:                             # BACK did not help -> restart app and re-enter
+                            esc(f'restart app (balance frozen {int(now - bal_ref["t"])}s)', im)
+                            app.restart(); st['restarts'] += 1; back_streak = 0
+                            if app.enter_slot(slot_id): st['bet'] = app.min_bet() or st['bet']
+                            same_since = None; bal_ref['val'], bal_ref['t'] = None, 0.0; bal_stuck_since = None
+                        else:
+                            esc(f'BACK (balance frozen {int(now - bal_ref["t"])}s)', im)
+                            d.back(); st['backs'] += 1; back_streak += 1; same_since = None
                     else:
                         if off_since is None:
                             off_since = now; span = {'vt0': vt()}; snap('stall' if ig else 'off', im)
@@ -313,14 +332,14 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                             esc(f'restart app (off {int(dur)}s, backs {back_streak})', im)
                             app.restart(); st['restarts'] += 1; back_streak = 0; centre_taps = 0; reset_rep()
                             if app.enter_slot(slot_id): st['bet'] = app.min_bet() or st['bet']
-                            off_since = same_since = None; bal_ref['val'], bal_ref['t'] = None, 0.0; close_span()
+                            off_since = same_since = None; bal_stuck_since = None; bal_ref['val'], bal_ref['t'] = None, 0.0; close_span()
                         elif frozen >= 45 or (dur > 240 and int(dur) % 60 < 5) or (centre_taps >= 10 and dur >= 120):
                             esc(f'BACK (frozen {int(frozen)}s, off {int(dur)}s, centre taps {centre_taps})', im)
                             d.back(); st['backs'] += 1; back_streak += 1; same_since = None; centre_taps = 0
                         elif app.is_lobby(im):
                             log('in lobby -> re-enter'); st['reenter'] += 1; span['lobby'] = 1; status('lobby')
                             if app.enter_slot(slot_id):
-                                st['bet'] = app.min_bet() or st['bet']; off_since = None; reset_rep(); bal_ref['val'], bal_ref['t'] = None, 0.0; close_span()
+                                st['bet'] = app.min_bet() or st['bet']; off_since = None; bal_stuck_since = None; reset_rep(); bal_ref['val'], bal_ref['t'] = None, 0.0; close_span()
                             else: esc('re-enter failed', im)
                         else:
                             if rep['ocr'][1] >= 3: rep['skip'].add(rep['ocr'][0])   # tapped 3x, no effect -> skip until back in game
