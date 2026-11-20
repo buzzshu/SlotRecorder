@@ -109,7 +109,7 @@ class Gui(tk.Tk):
         ttk.Button(run, text='💸 沒錢了·清除重跑', command=self._reset_now).pack(side='left', padx=(12, 0))
 
         ttk.Label(rec, text='錄製工作（每台模擬器一列；選一列再按「停止此台」）').grid(row=4, column=0, sticky='w', pady=(8, 0))
-        cols = (('emu', '模擬器', 110), ('app', 'App', 110), ('cur', '目前', 210), ('prog', '進度', 60), ('state', '狀態', 130),
+        cols = (('emu', '模擬器', 110), ('app', 'App', 110), ('cur', '目前', 240), ('prog', '進度', 120), ('state', '狀態', 130),
                 ('pop', '彈窗', 50), ('off', '非遊戲', 60), ('live', '即時統計', 190), ('note', '備註', 160))
         jtf = ttk.Frame(rec); jtf.grid(row=5, column=0, sticky='nsew')
         self.jt = ttk.Treeview(jtf, columns=[c for c, _, _ in cols], show='headings', height=3)
@@ -742,7 +742,8 @@ class Gui(tk.Tk):
             if d.free_disk_gb(vd) < need_disk and not messagebox.askyesno('資源不足', f'硬碟只剩 {d.free_disk_gb(vd):.1f} GB，這次約需 {need_disk:.0f} GB。仍要開始嗎？', parent=self): return
         group = 'G' + time.strftime('%Y%m%d_%H%M%S')
         self.groups[group] = {'app': a.id, 'idxs': set(), 'merged': False, 'slots': ids, 'n': n, 'precise': precise,
-                              'cycles': r, 'use': list(use), 'done': {}, 'stopped': set()}   # done[idx]=finished cycles; stopped=no more cycles
+                              'cycles': r, 'use': list(use), 'done': {}, 'stopped': set(),
+                              'per': dict(per), 'one_cycle': one_cycle}   # done[idx]=finished cycles; stopped=no more cycles; per/one_cycle feed the batch ETA
         self.log(f'=== 同時錄製 {group}：{n} 台 × {len(ids)} 款 × 重複 {r} 次（新建 {new} 台）===')
         for i in use: self.jobs[i] = {'prep': True, 'app': a.id, 'state': '準備中', 'cur': f'{len(ids)} 款 × {n} 台 × {r} 次', 'group': group}
         self._refresh_jobs()
@@ -940,18 +941,54 @@ class Gui(tk.Tk):
         self._bg(work)
 
     # ---------------- job table / events ----------------
+    @staticmethod
+    def _fmt_min(m):
+        m = int(round(m))
+        if m < 1: return '<1 分'
+        if m < 60: return f'{m} 分'
+        return f'{m // 60} 時 {m % 60} 分'
+    def _cur_cell(self, idx, j):
+        """目前欄：輪數(多輪時) + 這一輪的第幾款遊戲 + 名稱"""
+        if not j.get('slot_i'): return j.get('cur', '')                       # not recording yet -> placeholder / schedule text
+        cur = f"遊戲{j['slot_i']}/{j['slot_n']} {j.get('slot_name', '')}"
+        g = self.groups.get(j.get('group'))
+        if g and g.get('cycles', 1) > 1:
+            cur = f"輪{g['done'].get(idx, 0) + 1}/{g['cycles']}·{cur}"
+        return cur
+    def _prog_cell(self, j):
+        """進度欄：百分比 + 這支影片還要多久錄完"""
+        if not j.get('proc'): return ''
+        s = f"{j.get('prog', 0):.0f}%"
+        if j.get('tot_s'): s += ' · 剩' + self._fmt_min(max(0, j['tot_s'] - j.get('rec_s', 0)) / 60)
+        return s
+    def _job_eta_min(self, idx, j):
+        """這台模擬器把自己剩下的遊戲×輪數全部錄完還要多少分鐘(precise 模式是上限)"""
+        g = self.groups.get(j.get('group'))
+        if g and j.get('prep'): return g.get('cycles', 1) * (g.get('one_cycle') or 0)   # queued, not started -> whole load
+        this_rem = max(0, j.get('tot_s', 0) - j.get('rec_s', 0)) / 60 if j.get('tot_s') else 0
+        if not g: return this_rem
+        per, slots, one = g.get('per') or {}, g.get('slots') or [], g.get('one_cycle') or 0
+        xi = j.get('slot_i') or 0                                             # 1-based current game -> slots[xi:] are the ones after it
+        after = sum(per.get(s, 0) for s in slots[xi:]) if xi else 0
+        full_left = max(0, g.get('cycles', 1) - (g['done'].get(idx, 0) + 1)) * one
+        return this_rem + after + full_left
     def _refresh_jobs(self):
         keep = self.jt.selection()
         self.jt.delete(*self.jt.get_children())
         for idx, j in sorted(self.jobs.items()):
             app_name = dict(self.apps).get(j.get('app'), j.get('app', ''))
-            self.jt.insert('', 'end', iid=str(idx), values=(self.emu_name(idx), app_name, j.get('cur', ''),
-                           f"{j.get('prog', 0):.0f}%" if j.get('proc') else '', j.get('state', ''), j.get('pop', ''), j.get('off', ''),
+            self.jt.insert('', 'end', iid=str(idx), values=(self.emu_name(idx), app_name, self._cur_cell(idx, j),
+                           self._prog_cell(j), j.get('state', ''), j.get('pop', ''), j.get('off', ''),
                            j.get('live', ''), j.get('note', '')))
         keep = [k for k in keep if self.jt.exists(k)]
         if keep: self.jt.selection_set(keep)
         r = [i for i in self.jobs if self.running(i)]
-        self.status['text'] = f'錄製中：{len(r)} 台' if r else ('有排程' if self.jobs else '待命')
+        if r:
+            eta = max((self._job_eta_min(i, self.jobs[i]) for i in self.jobs if self.running(i) or self.jobs[i].get('prep')), default=0)
+            prec = any(g.get('precise') for g in self.groups.values())        # whole batch finishes when the slowest emulator does
+            self.status['text'] = f'錄製中：{len(r)} 台' + (f' · 整批約剩 {self._fmt_min(eta)}' + ('（上限）' if prec else '') if eta > 0 else '')
+        else:
+            self.status['text'] = '有排程' if self.jobs else '待命'
         cur = self.jobs.get(self._sel_job())
         self.bar['value'] = cur.get('prog', 0) if cur else 0
     def _tick(self):
@@ -997,9 +1034,14 @@ class Gui(tk.Tk):
                     _, idx, v = item; j = self.jobs.get(idx, {}); dirty = True
                     self.log(f'[{self.emu_name(idx)}] {v.rstrip()}')
                     m = re.search(r'PROGRESS (\d+)/(\d+)', v)
-                    if m: j['prog'] = 100 * int(m.group(1)) / max(1, int(m.group(2)))
+                    if m:
+                        rec, tot = int(m.group(1)), int(m.group(2))
+                        j['rec_s'], j['tot_s'] = rec, tot; j['prog'] = 100 * rec / max(1, tot)
                     m = re.search(r'SLOT (\d+)/(\d+) (\S+)', v)
-                    if m: j['cur'] = f'{m.group(1)}/{m.group(2)} {m.group(3)}'; j['prog'] = 0; j['live'] = ''
+                    if m:
+                        j['slot_i'], j['slot_n'], j['slot_name'] = int(m.group(1)), int(m.group(2)), m.group(3)
+                        j['cur'] = f'{m.group(1)}/{m.group(2)} {m.group(3)}'; j['prog'] = 0; j['live'] = ''
+                        j['rec_s'] = j['tot_s'] = 0          # new game -> no time estimate until its first PROGRESS line
                     m = re.search(r'STATUS (\w+)(?: spins=(\d+) popups=(\d+) off=(\d+)%)?', v)
                     if m:
                         j['state'] = STATE_ZH.get(m.group(1), m.group(1))
