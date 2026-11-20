@@ -13,6 +13,7 @@ from core import device as d
 from core.version import VERSION
 
 STOP_ALL = d.STOP_ALL
+SCAN_LBL = '🔍 掃描大廳找新遊戲'    # menu entry label; reused to toggle its enabled state during a scan
 MAX_MULTI = 6                       # 同時用 N 台: upper limit of the spinbox
 MAX_REPEAT = 20                     # 重複 N 次: upper limit of the repeat spinbox
 STARTUP_LNK = os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'SlotRecorder.lnk')
@@ -42,7 +43,9 @@ class Gui(tk.Tk):
 
     # ---------------- layout ----------------
     def _build(self):
-        top = ttk.Frame(self, padding=8); top.pack(fill='x')
+        self._build_menu()
+        # top bar: shared app / emulator pickers + update badge (always visible on every tab)
+        top = ttk.Frame(self, padding=(8, 6)); top.pack(fill='x')
         ttk.Label(top, text='App：').pack(side='left')
         self.app_var = tk.StringVar()
         self.app_box = ttk.Combobox(top, state='readonly', width=26, textvariable=self.app_var, values=[f'{n}  ({i})' for i, n in self.apps])
@@ -51,17 +54,24 @@ class Gui(tk.Tk):
         self.emu_var = tk.StringVar(); self.emu_box = ttk.Combobox(top, state='readonly', width=18, textvariable=self.emu_var)
         self.emu_box.pack(side='left'); self._load_emus()
         ttk.Button(top, text='↻', width=3, command=self._load_emus).pack(side='left', padx=(2, 8))
-        for text, cmd in (('環境檢查', self._env_check), ('看畫面', self._preview), ('準備模擬器', self._prepare_emu),
-                          ('設定', self._settings), ('打包帶走', self._pack)):
-            ttk.Button(top, text=text, command=cmd).pack(side='left', padx=2)
-        self.btn_update = ttk.Button(top, text='檢查更新', command=self._update); self.btn_update.pack(side='left', padx=2)
-        self.after(3000, self._check_update_async)           # background: is there a newer version in the git repo?
         self.status = ttk.Label(top, text='待命', foreground='#555'); self.status.pack(side='right')
+        self.btn_update = ttk.Button(top, text='檢查更新', command=self._update); self.btn_update.pack(side='right', padx=6)
+        self.after(3000, self._check_update_async)           # background: is there a newer version in the git repo?
 
-        body = ttk.PanedWindow(self, orient='horizontal'); body.pack(fill='both', expand=True, padx=8, pady=(0, 8))
-        left = ttk.Frame(body); body.add(left, weight=1)
-        ttk.Label(left, text='Slot 清單（雙擊「錄」切換勾選、雙擊「分鐘」「名稱」修改；依大廳順序）').pack(anchor='w')
-        flt = ttk.Frame(left); flt.pack(fill='x', pady=(2, 2))
+        # shared message / progress log pinned to the bottom (visible whichever tab is open)
+        logf = ttk.Frame(self, padding=(8, 0)); logf.pack(side='bottom', fill='x')
+        ttk.Label(logf, text='訊息 / 進度').pack(anchor='w')
+        self.logbox = tk.Text(logf, height=9, wrap='none', font=('Consolas', 9))
+        sb = ttk.Scrollbar(logf, command=self.logbox.yview); self.logbox.configure(yscrollcommand=sb.set)
+        sb.pack(side='right', fill='y'); self.logbox.pack(fill='x', pady=(2, 8))
+
+        nb = ttk.Notebook(self); nb.pack(fill='both', expand=True, padx=8, pady=(4, 0))
+        rec = ttk.Frame(nb, padding=6); nb.add(rec, text='  錄製  ')
+        rep = ttk.Frame(nb, padding=6); nb.add(rep, text='  分析 / 報告  ')
+
+        # ---- 錄製 tab: pick games -> record -> watch jobs ----
+        ttk.Label(rec, text='Slot 清單（雙擊「錄」切換勾選、雙擊「分鐘」「名稱」修改；新增 / 刪除 / 掃描大廳在上方「遊戲清單」選單）').pack(anchor='w')
+        flt = ttk.Frame(rec); flt.pack(fill='x', pady=(2, 2))
         ttk.Label(flt, text='搜尋：').pack(side='left')
         self.q_var = tk.StringVar(); self.q_var.trace_add('write', lambda *a: self._filter())
         ttk.Entry(flt, textvariable=self.q_var, width=22).pack(side='left')
@@ -69,27 +79,16 @@ class Gui(tk.Tk):
         ttk.Checkbutton(flt, text='只看已勾選', variable=self.only_on, command=self._filter).pack(side='left', padx=6)
         ttk.Button(flt, text='勾選樣本不足', command=self._pick_low).pack(side='left')
         self.count_lbl = ttk.Label(flt, text='', foreground='#555'); self.count_lbl.pack(side='right')
-        tf = ttk.Frame(left); tf.pack(fill='both', expand=True)
-        self.tree = ttk.Treeview(tf, columns=('on', 'name', 'min', 'id'), show='headings', height=12)
+        tf = ttk.Frame(rec); tf.pack(fill='both', expand=True)
+        self.tree = ttk.Treeview(tf, columns=('on', 'name', 'min', 'id'), show='headings', height=10)
         for c, t, w in (('on', '錄', 40), ('name', '名稱', 230), ('min', '分鐘', 50), ('id', '縮圖 id', 120)):
             self.tree.heading(c, text=t); self.tree.column(c, width=w, anchor='center' if c in ('on', 'min') else 'w')
         tsb = ttk.Scrollbar(tf, command=self.tree.yview); self.tree.configure(yscrollcommand=tsb.set)
         tsb.pack(side='right', fill='y'); self.tree.pack(fill='both', expand=True)
         self.tree.bind('<Double-1>', self._tree_dbl); self.tree.bind('<<TreeviewSelect>>', lambda e: self._show_thumb())
-        self.thumb = ttk.Label(left); self.thumb.pack(anchor='w', pady=(4, 0))
-        bt = ttk.Frame(left); bt.pack(fill='x', pady=(6, 2))
-        self.btn_add = ttk.Button(bt, text='＋ 新增 slot', command=self._add_slot); self.btn_add.pack(side='left')
-        self.btn_del = ttk.Button(bt, text='刪除', command=self._del_slot); self.btn_del.pack(side='left', padx=4)
-        self.btn_test = ttk.Button(bt, text='測試尋找', command=self._test_find); self.btn_test.pack(side='left')
-        ttk.Button(bt, text='📖 賠率表', command=self._paytable).pack(side='left', padx=4)
-        btb = ttk.Frame(left); btb.pack(fill='x', pady=(0, 2))
-        self.btn_scan = ttk.Button(btb, text='🔍 掃描大廳找新遊戲', command=self._scan_catalog); self.btn_scan.pack(side='left')
-        bt2 = ttk.LabelFrame(left, text='卡在新彈窗？把它的 X / 按鈕加成範本（錄製中也可以加，馬上生效）', padding=4); bt2.pack(fill='x', pady=4)
-        ttk.Button(bt2, text='＋ 從目前畫面框選', command=lambda: self._add_tpl(False)).pack(side='left')
-        ttk.Button(bt2, text='＋ 從截圖檔框選', command=lambda: self._add_tpl(True)).pack(side='left', padx=4)
+        self.thumb = ttk.Label(rec); self.thumb.pack(anchor='w', pady=(4, 0))
 
-        right = ttk.Frame(body); body.add(right, weight=2)
-        run = ttk.Frame(right); run.pack(fill='x')
+        run = ttk.Frame(rec); run.pack(fill='x', pady=(6, 0))
         self.btn_start = ttk.Button(run, text='▶ 開始錄製', command=self._start); self.btn_start.pack(side='left')
         ttk.Label(run, text=' 同時用').pack(side='left')
         self.n_var = tk.IntVar(value=1)
@@ -104,23 +103,53 @@ class Gui(tk.Tk):
         ttk.Button(run, text='↻ 接續上次', command=self._resume).pack(side='left')
         ttk.Button(run, text='■ 停止此台', command=self._stop).pack(side='left', padx=(12, 4))
         ttk.Button(run, text='■ 全部停止', command=self._stop_all).pack(side='left')
-        out = ttk.Frame(right); out.pack(fill='x', pady=(4, 0))               # analysis / report row (own line so nothing gets clipped)
-        ttk.Label(out, text='分析 / 報告：').pack(side='left')
-        ttk.Button(out, text='📊 分析影片', command=self._analyze).pack(side='left', padx=2)
-        ttk.Button(out, text='📋 總覽', command=self._overview).pack(side='left', padx=2)
-        ttk.Button(out, text='🎰 特色分布', command=self._feature_report).pack(side='left', padx=2)
-        ttk.Button(out, text='開啟影片資料夾', command=self._open_videos).pack(side='left', padx=2)
-        ttk.Label(right, text='錄製工作（每台模擬器一列；選一列再按「停止此台」）').pack(anchor='w', pady=(8, 0))
+
+        ttk.Label(rec, text='錄製工作（每台模擬器一列；選一列再按「停止此台」）').pack(anchor='w', pady=(8, 0))
         cols = (('emu', '模擬器', 110), ('app', 'App', 110), ('cur', '目前', 210), ('prog', '進度', 60), ('state', '狀態', 130),
                 ('pop', '彈窗', 50), ('off', '非遊戲', 60), ('live', '即時統計', 190), ('note', '備註', 160))
-        self.jt = ttk.Treeview(right, columns=[c for c, _, _ in cols], show='headings', height=4)
+        self.jt = ttk.Treeview(rec, columns=[c for c, _, _ in cols], show='headings', height=4)
         for c, t, w in cols: self.jt.heading(c, text=t); self.jt.column(c, width=w, anchor='w')
         self.jt.pack(fill='x')
-        self.bar = ttk.Progressbar(right, maximum=100); self.bar.pack(fill='x', pady=(4, 0))
-        self.logbox = tk.Text(right, height=18, wrap='none', font=('Consolas', 9))
-        sb = ttk.Scrollbar(right, command=self.logbox.yview); self.logbox.configure(yscrollcommand=sb.set)
-        sb.pack(side='right', fill='y'); self.logbox.pack(fill='both', expand=True, pady=(6, 0))
+        self.bar = ttk.Progressbar(rec, maximum=100); self.bar.pack(fill='x', pady=(4, 0))
+
+        # ---- 分析 / 報告 tab ----
+        ttk.Label(rep, text='錄完影片後在這裡看結果，報告會自動開啟。', foreground='#555').pack(anchor='w', pady=(2, 10))
+        ob = ttk.Frame(rep); ob.pack(fill='x')
+        ttk.Button(ob, text='📊 分析影片（挑影片算 RTP / 中獎率）', command=self._analyze).pack(side='left')
+        ttk.Button(ob, text='📋 總覽（所有遊戲彙總）', command=self._overview).pack(side='left', padx=6)
+        ob2 = ttk.Frame(rep); ob2.pack(fill='x', pady=(8, 0))
+        ttk.Button(ob2, text='🎰 特色分布（選取遊戲的累積贏分分布）', command=self._feature_report).pack(side='left')
+        ttk.Button(ob2, text='📂 開啟影片資料夾', command=self._open_videos).pack(side='left', padx=6)
+        ttk.Label(rep, text='「🎰 特色分布」：先到「錄製」分頁的清單點選一款遊戲，再按這顆。數據會跨天 / 跨場次累積。',
+                  foreground='#888').pack(anchor='w', pady=(12, 0))
+
         if self.apps: self.app_box.current(0); self._load_slots()
+
+    def _build_menu(self):
+        """menu bar for setup / admin, so the main screen keeps only the daily recording flow"""
+        m = tk.Menu(self); self.config(menu=m)
+        mm = tk.Menu(m, tearoff=0); m.add_cascade(label='模擬器', menu=mm)
+        mm.add_command(label='看畫面', command=self._preview)
+        mm.add_command(label='環境檢查', command=self._env_check)
+        mm.add_command(label='準備模擬器', command=self._prepare_emu)
+        g = tk.Menu(m, tearoff=0); m.add_cascade(label='遊戲清單', menu=g); self.m_games = g
+        g.add_command(label='＋ 新增 slot', command=self._add_slot)
+        g.add_command(label='刪除選取的遊戲', command=self._del_slot)
+        g.add_command(label='測試尋找', command=self._test_find)
+        g.add_separator()
+        g.add_command(label=SCAN_LBL, command=self._scan_catalog)
+        g.add_command(label='📖 賠率表', command=self._paytable)
+        g.add_separator()
+        g.add_command(label='＋ 從目前畫面框選範本', command=lambda: self._add_tpl(False))
+        g.add_command(label='＋ 從截圖檔框選範本', command=lambda: self._add_tpl(True))
+        t = tk.Menu(m, tearoff=0); m.add_cascade(label='工具', menu=t)
+        t.add_command(label='打包帶走（做給同事的安裝包）', command=self._pack)
+        t.add_separator()
+        t.add_command(label='設定…', command=self._settings)
+
+    def _scan_menu_enabled(self, on):
+        try: self.m_games.entryconfig(SCAN_LBL, state='normal' if on else 'disabled')
+        except Exception: pass
 
     # ---------------- helpers ----------------
     def app(self):
@@ -534,7 +563,7 @@ class Gui(tk.Tk):
         if not messagebox.askokcancel('掃描大廳找新遊戲', f'在模擬器 {self.emu_name(idx)} 把 {a.p["name"]} 的大廳從頭滑到尾（約 5~8 分鐘），\n'
                                       '清單裡還沒有的遊戲會自動加入（不勾選；名字是讀圖猜的，可雙擊「名稱」修改）。\n期間請不要操作這台模擬器。', parent=self): return
         self.log(f'--- 掃描 {a.p["name"]} 大廳（模擬器 {self.emu_name(idx)}）---')
-        self.scanning = idx; self.btn_scan['state'] = 'disabled'
+        self.scanning = idx; self._scan_menu_enabled(False)
         def work():
             rc = -1
             try:
@@ -954,7 +983,7 @@ class Gui(tk.Tk):
                     for h in item[1]:
                         if os.path.exists(h): os.startfile(h)
                 elif kind == 'reload':
-                    self.scanning = None; self.btn_scan['state'] = 'normal'; self._load_slots()
+                    self.scanning = None; self._scan_menu_enabled(True); self._load_slots()
                     self.log('=== 掃描完成，清單已更新 ===' if item[1] == 0 else f'=== 掃描失敗（rc={item[1]}），看上面的訊息 ===')
                 elif kind == 'run':
                     _, idx, v = item; j = self.jobs.get(idx, {}); dirty = True
