@@ -82,11 +82,11 @@ class Gui(tk.Tk):
         self.tree = ttk.Treeview(tf, columns=('name', 'min', 'id'), show='headings', height=10, selectmode='browse')
         for c, t, w in (('name', '名稱', 240), ('min', '分鐘', 50), ('id', '縮圖 id', 120)):
             self.tree.heading(c, text=t); self.tree.column(c, width=w, anchor='center' if c == 'min' else 'w')
+        rp = ttk.Frame(tf, width=210); rp.pack(side='right', fill='y'); rp.pack_propagate(False)   # thumbnail lives BESIDE the list, out of the 開始錄製 row's vertical path, so selecting a game never shifts the buttons
+        self.thumb = ttk.Label(rp); self.thumb.pack(anchor='nw', padx=(6, 0), pady=(2, 0))
         tsb = ttk.Scrollbar(tf, command=self.tree.yview); self.tree.configure(yscrollcommand=tsb.set)
-        tsb.pack(side='right', fill='y'); self.tree.pack(fill='both', expand=True)
+        tsb.pack(side='right', fill='y'); self.tree.pack(side='left', fill='both', expand=True)
         self.tree.bind('<Double-1>', self._tree_dbl); self.tree.bind('<<TreeviewSelect>>', lambda e: self._show_thumb())
-        tp = ttk.Frame(rec, height=174); tp.pack(anchor='w', fill='x', pady=(4, 0)); tp.pack_propagate(False)  # fixed height so selecting a game can't shove the 開始錄製 row around
-        self.thumb = ttk.Label(tp); self.thumb.pack(anchor='w')
 
         run = ttk.Frame(rec); run.pack(fill='x', pady=(6, 0))
         self.btn_start = ttk.Button(run, text='▶ 開始錄製', command=self._start); self.btn_start.pack(side='left')
@@ -216,8 +216,8 @@ class Gui(tk.Tk):
         if not p: self.thumb.configure(image='', text='（沒有縮圖）'); return
         import cv2
         from PIL import Image, ImageTk
-        im = imread(p); h, w = im.shape[:2]; s = 170 / h
-        ph = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(cv2.resize(im, (max(1, int(w * s)), 170)), cv2.COLOR_BGR2RGB)))
+        im = imread(p); h, w = im.shape[:2]; s = min(200 / w, 190 / h)   # fit inside the side panel (keep aspect)
+        ph = ImageTk.PhotoImage(Image.fromarray(cv2.cvtColor(cv2.resize(im, (max(1, int(w * s)), max(1, int(h * s)))), cv2.COLOR_BGR2RGB)))
         self.thumb.configure(image=ph, text=''); self.thumb.image = ph
     def _locked(self):
         if getattr(self, 'scanning', None) is not None:
