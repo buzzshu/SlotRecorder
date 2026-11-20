@@ -27,6 +27,18 @@ def stop_requested():
 def check_stop():
     if stop_requested(): raise StopRequested()
 
+def reset_file(idx=None):
+    """per-emulator manual-reset flag: <ROOT>/RESET_<index>. GUI drops it when the user presses
+    '沒錢了·清除重跑'; the recorder consumes it and runs the normal out-of-coins reset immediately."""
+    return os.path.join(ROOT, f'RESET_{JOB_IDX if idx is None else int(idx)}')
+
+def reset_requested():
+    return os.path.exists(reset_file())
+
+def clear_reset():
+    try: os.remove(reset_file())
+    except OSError: pass
+
 def use(idx):
     """point all adb calls of this process at LDPlayer instance <idx>"""
     global SER, IDX

@@ -97,12 +97,11 @@ class Gui(tk.Tk):
         self.r_var = tk.IntVar(value=1)
         ttk.Spinbox(run, from_=1, to=MAX_REPEAT, width=3, textvariable=self.r_var, state='readonly').pack(side='left')
         ttk.Label(run, text='次').pack(side='left', padx=(0, 6))
-        self.precise_var = tk.BooleanVar(value=bool(CFG.get('precise_default', False)))
-        ttk.Checkbutton(run, text='夠準就停', variable=self.precise_var).pack(side='left', padx=(0, 6))
-        ttk.Button(run, text='⏰ 定時開始', command=self._schedule).pack(side='left', padx=4)
-        ttk.Button(run, text='↻ 接續上次', command=self._resume).pack(side='left')
+        self.precise_var = tk.BooleanVar(value=bool(CFG.get('precise_default', False)))   # kept for _start / 接續; the UI toggle was removed
+        ttk.Button(run, text='↻ 接續上次', command=self._resume).pack(side='left', padx=(6, 0))
         ttk.Button(run, text='■ 停止此台', command=self._stop).pack(side='left', padx=(12, 4))
         ttk.Button(run, text='■ 全部停止', command=self._stop_all).pack(side='left')
+        ttk.Button(run, text='💸 沒錢了·清除重跑', command=self._reset_now).pack(side='left', padx=(12, 0))
 
         ttk.Label(rec, text='錄製工作（每台模擬器一列；選一列再按「停止此台」）').pack(anchor='w', pady=(8, 0))
         cols = (('emu', '模擬器', 110), ('app', 'App', 110), ('cur', '目前', 210), ('prog', '進度', 60), ('state', '狀態', 130),
@@ -773,6 +772,7 @@ class Gui(tk.Tk):
         if self._alive(self.jobs.get(idx)) or any(self._alive(o) and o.get('on') == idx for o in self.jobs.values()): return
         sf = d.stop_file(idx)
         if os.path.exists(sf): os.remove(sf)
+        if os.path.exists(d.reset_file(idx)): os.remove(d.reset_file(idx))   # clear a stale 清除重跑 flag from a previous run
         if os.path.exists(STOP_ALL): os.remove(STOP_ALL); self.log('（移除了上次留下的全域 STOP 檔）')
         json.dump({'app': app_id, 'slots': ids, 'job': job, 'emu': idx, 'split': split, 'group': group, 'precise': precise}, open(last_job_path(idx), 'w'))
         env = dict(os.environ, PYTHONIOENCODING='utf-8', PYTHONUTF8='1', SLOTREC_LOG=os.path.join(LOG_DIR, f'job_{job}.log'))
@@ -812,6 +812,27 @@ class Gui(tk.Tk):
                 if g and 'done' in g: g.setdefault('stopped', set()).add(i)   # no more repeat cycles
                 open(d.stop_file(i), 'w').close(); j['state'] = '停止中…'
         self.log('--- 全部停止：每台都會把已錄的部分存好 ---'); self._refresh_jobs()
+    def _reset_now(self):
+        """沒錢了·清除重跑: signal the running recorder on the selected emulator to do its out-of-coins
+        reset now (clear app data / new instance per the app's profile), instead of waiting for auto-detect."""
+        idx = self._sel_job(); j = self.jobs.get(idx)
+        if not self.running(idx):
+            messagebox.showinfo('清除重跑', f'模擬器 {self.emu_name(idx)} 沒有在錄製，不用清除重跑。', parent=self); return
+        try: mode = App(j['app']).p.get('reset', 'pm_clear') if j and j.get('app') else 'pm_clear'
+        except Exception: mode = 'pm_clear'
+        if mode == 'none' or (mode == 'new_instance' and not CFG.get('new_instance_reset', True)):
+            if not messagebox.askyesno('清除重跑',
+                    f'這款 app 沒有設定「沒錢自動重來」的方式' + ('（需在設定開啟「自動建新模擬器」）' if mode == 'new_instance' else '') +
+                    '。\n現在送出重跑，可能會改成「停止並保存影片」。\n仍要送出嗎？', parent=self):
+                return
+        elif not messagebox.askyesno('清除重跑',
+                f'對模擬器 {self.emu_name(idx)} 立刻「清除重跑」：\n'
+                '清掉這款 app 的本機資料 → 重新進遊戲拿回初始金幣 → 接著錄。\n'
+                '（你已錄好的影片不受影響。）\n\n現在就做嗎？', parent=self):
+            return
+        open(d.reset_file(idx), 'w').close()
+        if j: j['state'] = '清除重跑中…（清資料→重進遊戲，約 1~3 分鐘）'
+        self.log(f'--- 模擬器 {self.emu_name(idx)}：已要求「沒錢清除重跑」，最多約 5 秒後開始 ---'); self._refresh_jobs()
     def _open_videos(self):
         a = self.app(); os.startfile(video_dir(a.id if a else ''))
 

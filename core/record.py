@@ -253,8 +253,10 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                                 if all(r is not None and r < thr for r in reads) and max(reads) - min(reads) <= 3 * st['bet']:
                                     log(f'balance {bal:,} < {p["low_balance_bets"]} bets (confirmed {reads})'); poor = True
                                 else: log('low balance read not confirmed', reads)
+                    manual = d.reset_requested()                 # GUI '沒錢了·清除重跑' pressed -> reset now, don't wait for auto-detect
+                    if manual: d.clear_reset(); log('MANUAL reset requested -> clear & rerun')
                     force = FORCE_RESET_AT and now - t0 > FORCE_RESET_AT and st['resets'] == 0
-                    if force or poor or app.low_coins(im):
+                    if force or poor or manual or app.low_coins(im):
                         snap('lowcoins', im)
                         mode = p.get('reset', 'pm_clear')
                         if mode == 'new_instance' and not CFG.get('new_instance_reset', True): mode = 'none'   # GUI 設定 switch
