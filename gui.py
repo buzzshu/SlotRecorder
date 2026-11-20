@@ -55,7 +55,9 @@ class Gui(tk.Tk):
         self.emu_box.pack(side='left'); self._load_emus()
         ttk.Button(top, text='↻', width=3, command=self._load_emus).pack(side='left', padx=(2, 8))
         self.status = ttk.Label(top, text='待命', foreground='#555'); self.status.pack(side='right')
-        self.btn_update = ttk.Button(top, text='檢查更新', command=self._update); self.btn_update.pack(side='right', padx=6)
+        # update is a menu action (工具 ▸ 檢查更新); the top bar only shows a badge, and only when it matters
+        self.upd_lbl = ttk.Label(top, text='', foreground='#c0392b', cursor='hand2'); self.upd_lbl.pack(side='right', padx=6)
+        self.upd_lbl.bind('<Button-1>', lambda e: self._update())
         self.after(3000, self._check_update_async)           # background: is there a newer version in the git repo?
 
         # shared message / progress log pinned to the bottom (visible whichever tab is open)
@@ -77,7 +79,6 @@ class Gui(tk.Tk):
         ttk.Entry(flt, textvariable=self.q_var, width=22).pack(side='left')
         self.only_on = tk.BooleanVar(value=False)
         ttk.Checkbutton(flt, text='只看已勾選', variable=self.only_on, command=self._filter).pack(side='left', padx=6)
-        ttk.Button(flt, text='勾選樣本不足', command=self._pick_low).pack(side='left')
         self.count_lbl = ttk.Label(flt, text='', foreground='#555'); self.count_lbl.pack(side='right')
         tf = ttk.Frame(rec); tf.pack(fill='both', expand=True)
         self.tree = ttk.Treeview(tf, columns=('on', 'name', 'min', 'id'), show='headings', height=10)
@@ -97,8 +98,7 @@ class Gui(tk.Tk):
         self.r_var = tk.IntVar(value=1)
         ttk.Spinbox(run, from_=1, to=MAX_REPEAT, width=3, textvariable=self.r_var, state='readonly').pack(side='left')
         ttk.Label(run, text='次').pack(side='left', padx=(0, 6))
-        self.precise_var = tk.BooleanVar(value=bool(CFG.get('precise_default', False)))   # kept for _start / 接續; the UI toggle was removed
-        ttk.Button(run, text='↻ 接續上次', command=self._resume).pack(side='left', padx=(6, 0))
+        self.precise_var = tk.BooleanVar(value=bool(CFG.get('precise_default', False)))   # kept for _start / 接續; UI toggle removed
         ttk.Button(run, text='■ 停止此台', command=self._stop).pack(side='left', padx=(12, 4))
         ttk.Button(run, text='■ 全部停止', command=self._stop_all).pack(side='left')
         ttk.Button(run, text='💸 沒錢了·清除重跑', command=self._reset_now).pack(side='left', padx=(12, 0))
@@ -135,16 +135,30 @@ class Gui(tk.Tk):
         g.add_command(label='＋ 新增 slot', command=self._add_slot)
         g.add_command(label='刪除選取的遊戲', command=self._del_slot)
         g.add_command(label='測試尋找', command=self._test_find)
+        g.add_command(label='勾選樣本不足（自動勾未達目標局數的）', command=self._pick_low)
         g.add_separator()
         g.add_command(label=SCAN_LBL, command=self._scan_catalog)
         g.add_command(label='📖 賠率表', command=self._paytable)
         g.add_separator()
-        g.add_command(label='＋ 從目前畫面框選範本', command=lambda: self._add_tpl(False))
-        g.add_command(label='＋ 從截圖檔框選範本', command=lambda: self._add_tpl(True))
+        g.add_command(label='＋ 加介面範本（卡彈窗時用）', command=self._add_tpl_choose)
         t = tk.Menu(m, tearoff=0); m.add_cascade(label='工具', menu=t)
+        t.add_command(label='↻ 接續上次中斷的錄影', command=self._resume)
+        t.add_command(label='檢查更新', command=self._update)
+        t.add_separator()
         t.add_command(label='打包帶走（做給同事的安裝包）', command=self._pack)
         t.add_separator()
         t.add_command(label='設定…', command=self._settings)
+
+    def _add_tpl_choose(self):
+        """one entry for both template sources; ask which, then reuse _add_tpl(from_file=…)"""
+        r = messagebox.askyesnocancel('加介面範本',
+                '卡在未知彈窗時，把它的 X / 按鈕框起來當範本。\n\n'
+                '範本從哪裡來？\n'
+                '　是 = 從目前模擬器畫面擷取\n'
+                '　否 = 從一張截圖檔選\n'
+                '　取消 = 不做', parent=self)
+        if r is None: return
+        self._add_tpl(r is False)                                # 是→畫面(from_file=False)；否→截圖檔(from_file=True)
 
     def _scan_menu_enabled(self, on):
         try: self.m_games.entryconfig(SCAN_LBL, state='normal' if on else 'disabled')
@@ -265,9 +279,11 @@ class Gui(tk.Tk):
 
     def _set_update_btn(self, st, lo, rv):
         self._upd = (st, lo, rv)
-        txt = {'update': f'★ 有更新 v{rv}', 'current': f'已是最新 v{lo}', 'not_repo': '更新：需先設定',
-               'offline': '檢查更新', 'no_git': '更新：需裝 git', 'err': '檢查更新'}.get(st, '檢查更新')
-        try: self.btn_update.config(text=txt)
+        # top-bar badge: red when a new version is out, a muted hint when update isn't set up, else nothing
+        txt, col = {'update': (f'★ 有新版 v{rv}（按這裡更新）', '#c0392b'),
+                    'not_repo': ('更新未設定（跑 setup_git.bat）', '#888'),
+                    'no_git': ('更新需裝 git', '#888')}.get(st, ('', '#888'))
+        try: self.upd_lbl.config(text=txt, foreground=col)
         except Exception: pass
 
     def _update(self):
@@ -286,19 +302,18 @@ class Gui(tk.Tk):
         if st != 'update':
             return
         if not messagebox.askyesno('更新', f'目前 v{lo}，有新版 v{rv}。\n現在更新嗎？（只更新程式碼，不會動到你的錄影與設定）'): return
-        self.btn_update.config(text='更新中…', state='disabled')
+        self.upd_lbl.config(text='更新中…', foreground='#888')
         def work():
             ok, msg = update.do_update()
             self.after(0, lambda: self._update_done(ok, msg))
         threading.Thread(target=work, daemon=True).start()
 
     def _update_done(self, ok, msg):
-        self.btn_update.config(state='normal')
         if ok:
-            self.btn_update.config(text='更新完成，請重開')
+            self.upd_lbl.config(text='✔ 更新完成，請重開工具', foreground='#1a7f37')
             messagebox.showinfo('更新完成', '更新完成。請關閉並重新開啟 SlotRecorder 讓新版生效。')
         else:
-            self.btn_update.config(text='★ 有更新')
+            self.upd_lbl.config(text='★ 有新版（按這裡更新）', foreground='#c0392b')
             messagebox.showerror('更新失敗', msg)
 
     def _env_check(self):
