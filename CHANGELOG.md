@@ -10,6 +10,7 @@
   - `python -m core.ledger report <遊戲> [--pdf]`:**任何時候**讀整本帳 → 產贏分區間機率分布報告
     (直方圖 + 分位數 + 體感「每 N 次特色中一次 ≥50x」+ 跨天累積進度表 + RTP 佔比),HTML 兼 PDF。
   - `python -m core.ledger list` 看目前累積;`backfill [資料夾]` 把既有影片一次補進帳本。
+  - GUI 右側新增 **🎰 特色分布** 按鈕:在清單點一款遊戲 → 一鍵產生並開啟該遊戲的累積分布 PDF。
   - `stats/` 是純 TSV、可進 git → `git add stats/ && commit` 就能跨電腦同步、把同事錄的也併進來。
   - 帳本不進同事的 bootstrap zip(`pack.py` 已排除),也不覆蓋任何錄影/設定。
 

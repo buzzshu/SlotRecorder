@@ -106,6 +106,7 @@ class Gui(tk.Tk):
         ttk.Button(run, text='開啟影片資料夾', command=self._open_videos).pack(side='right')
         ttk.Button(run, text='📊 分析影片', command=self._analyze).pack(side='right', padx=4)
         ttk.Button(run, text='📋 總覽', command=self._overview).pack(side='right')
+        ttk.Button(run, text='🎰 特色分布', command=self._feature_report).pack(side='right', padx=4)
         ttk.Label(right, text='錄製工作（每台模擬器一列；選一列再按「停止此台」）').pack(anchor='w', pady=(8, 0))
         cols = (('emu', '模擬器', 110), ('app', 'App', 110), ('cur', '目前', 210), ('prog', '進度', 60), ('state', '狀態', 130),
                 ('pop', '彈窗', 50), ('off', '非遊戲', 60), ('live', '即時統計', 190), ('note', '備註', 160))
@@ -835,6 +836,26 @@ class Gui(tk.Tk):
                 from core import overview
                 h = overview.build(say=say); os.startfile(h)
             except Exception as e: say(f'總覽失敗：{e!r}')
+        self._bg(work)
+    def _feature_report(self):
+        """accumulated feature-win distribution report for the selected game (reads the persistent ledger)"""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo('特色分布報告', '先在清單點選一款遊戲（報告用的是它累積到現在的所有特色資料）', parent=self); return
+        sid = sel[0]; name = self.tree.set(sid, 'name')
+        self.log(f'--- 產生特色贏分分布報告：{name}（累積帳本，跨天/跨場次）---')
+        def work():
+            say = lambda s: self.q.put(('log', s))
+            try:
+                from core import ledger
+                out = ledger.report(sid, pdf=True, say=say)
+                if not out:
+                    say(f'{name}：帳本裡還沒有這款的特色資料。先錄幾場，analyze 完會自動累積進去。')
+                    return
+                pdf = out[:-5] + '.pdf'
+                os.startfile(pdf if os.path.exists(pdf) else out)
+            except Exception as e:
+                say(f'報告失敗：{e!r}')
         self._bg(work)
     def _pick_low(self):
         """tick the games of this app that were recorded but have fewer spins than the target; minutes = estimate to reach it"""

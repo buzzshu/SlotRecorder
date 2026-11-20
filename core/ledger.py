@@ -196,11 +196,14 @@ def _find_slug(query):
     if not os.path.isdir(STATS):
         return None
     slugs = [fn[:-len('.features.tsv')] for fn in os.listdir(STATS) if fn.endswith('.features.tsv')]
-    q = re.sub(r'[^0-9A-Za-z]+', '', query).lower()
-    exact = [s for s in slugs if s.lower() == q]
+    norm = lambda x: re.sub(r'[^0-9A-Za-z]+', '', str(x)).lower()
+    q = norm(query)
+    if not q:
+        return None
+    exact = [s for s in slugs if norm(s) == q]
     if exact:
         return exact[0]
-    part = [s for s in slugs if q in s.lower()]
+    part = [s for s in slugs if q in norm(s)]
     return part[0] if len(part) == 1 else (sorted(part, key=len)[0] if part else None)
 
 
