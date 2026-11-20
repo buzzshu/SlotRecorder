@@ -3,6 +3,16 @@
 版號規則：`主版.次版.修正`。新功能 → 次版 +1；只修 bug → 修正 +1。
 版號寫在 `core/version.py`，GUI 標題列、log、打包檔名都會顯示。
 
+## 1.10.0 — 2026-11-20
+- **特色贏分永久帳本 + 分布報告(跨天 / 跨場次 / 跨電腦累積)**:新增 `core/ledger.py`。每支影片 analyze 完,
+  會把它偵測到的每一次特色(總贏分、倍數、持續秒數)自動累加進 `stats/<遊戲>.features.tsv`(以影片 id 當 key,
+  **重跑同一支不會重複計**)。解決「每次錄完各出一份孤立報告、沒辦法把今天 5 小時 + 明天 5 小時的數字併起來」的問題。
+  - `python -m core.ledger report <遊戲> [--pdf]`:**任何時候**讀整本帳 → 產贏分區間機率分布報告
+    (直方圖 + 分位數 + 體感「每 N 次特色中一次 ≥50x」+ 跨天累積進度表 + RTP 佔比),HTML 兼 PDF。
+  - `python -m core.ledger list` 看目前累積;`backfill [資料夾]` 把既有影片一次補進帳本。
+  - `stats/` 是純 TSV、可進 git → `git add stats/ && commit` 就能跨電腦同步、把同事錄的也併進來。
+  - 帳本不進同事的 bootstrap zip(`pack.py` 已排除),也不覆蓋任何錄影/設定。
+
 ## 1.9.12 — 2026-11-19
 - **特色 / cash collect / pick 期間點擊加速**:偵測到餘額凍結(特色/Hold&Spin/pick 進行中)時,把每次點擊的間隔從 0.25s
   縮到 0.1s(`feat_tap_s`,env `SLOTREC_FEAT_TAP_S` 可調),讓免費遊戲/收集/選物更快打完;一般局維持 0.25s 不變。

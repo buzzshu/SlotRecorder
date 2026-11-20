@@ -359,6 +359,9 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
     try:                                                     # per-spin handoff for a downstream board recognizer (slot-video-recog / te-ldplayer)
         from .handoff import build as _handoff; _handoff(mp4, say)
     except Exception as e: say(f'handoff not made: {e!r}')
+    try:                                                     # accumulate this video's features into the persistent per-game ledger
+        from .ledger import add as _ledger; _ledger(base + '_summary.json', say)
+    except Exception as e: say(f'ledger not updated: {e!r}')
     _pdf(base + '_summary.html', say)
     say(f'spins {n}  RTP {rtp:.1%} ({lo and f"{lo:.0%}"}~{hi and f"{hi:.0%}"})  hit 1/{summary["hit_every_n"]}  '
         f'bet {bet:,}  read {read_ok:.0%}  -> {os.path.basename(base)}_summary.html')

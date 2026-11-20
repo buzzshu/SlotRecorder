@@ -5,6 +5,9 @@
 videos/
 logs/
 catalog/
+# feature-win ledger = your collected game data. repo is PUBLIC, so keep it OUT of here.
+# cross-PC sync for it goes through a PRIVATE channel (private repo / shared drive), not this repo.
+stats/
 
 # machine-local settings & flags (pack.py already skips these; git must too)
 config.json

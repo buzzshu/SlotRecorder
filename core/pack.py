@@ -7,7 +7,7 @@ from .config import ROOT
 
 # apk_cache IS bundled (so a fresh PC can install the apps with no source emulator) -- except Play-protected apps,
 # which refuse to run when sideloaded, so bundling them is pointless and they must be installed from the Play Store.
-SKIP_DIRS = {'videos', 'logs', '__pycache__', '.git', 'python'}
+SKIP_DIRS = {'videos', 'logs', '__pycache__', '.git', 'python', 'stats'}
 SKIP_FILES = {'python_dir.txt', 'config.json', 'STOP'}
 APK_CACHE = os.path.join(ROOT, 'apk_cache')
 
