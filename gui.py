@@ -85,7 +85,8 @@ class Gui(tk.Tk):
         tsb = ttk.Scrollbar(tf, command=self.tree.yview); self.tree.configure(yscrollcommand=tsb.set)
         tsb.pack(side='right', fill='y'); self.tree.pack(fill='both', expand=True)
         self.tree.bind('<Double-1>', self._tree_dbl); self.tree.bind('<<TreeviewSelect>>', lambda e: self._show_thumb())
-        self.thumb = ttk.Label(rec); self.thumb.pack(anchor='w', pady=(4, 0))
+        tp = ttk.Frame(rec, height=174); tp.pack(anchor='w', fill='x', pady=(4, 0)); tp.pack_propagate(False)  # fixed height so selecting a game can't shove the 開始錄製 row around
+        self.thumb = ttk.Label(tp); self.thumb.pack(anchor='w')
 
         run = ttk.Frame(rec); run.pack(fill='x', pady=(6, 0))
         self.btn_start = ttk.Button(run, text='▶ 開始錄製', command=self._start); self.btn_start.pack(side='left')
