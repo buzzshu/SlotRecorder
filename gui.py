@@ -72,18 +72,16 @@ class Gui(tk.Tk):
         rep = ttk.Frame(nb, padding=6); nb.add(rep, text='  分析 / 報告  ')
 
         # ---- 錄製 tab: pick games -> record -> watch jobs ----
-        ttk.Label(rec, text='Slot 清單（雙擊「錄」切換勾選、雙擊「分鐘」「名稱」修改；新增 / 刪除 / 掃描大廳在上方「遊戲清單」選單）').pack(anchor='w')
+        ttk.Label(rec, text='Slot 清單（點一下選要錄的遊戲、雙擊「名稱」「分鐘」修改；新增 / 刪除 / 掃描大廳在上方「遊戲清單」選單）').pack(anchor='w')
         flt = ttk.Frame(rec); flt.pack(fill='x', pady=(2, 2))
         ttk.Label(flt, text='搜尋：').pack(side='left')
         self.q_var = tk.StringVar(); self.q_var.trace_add('write', lambda *a: self._filter())
         ttk.Entry(flt, textvariable=self.q_var, width=22).pack(side='left')
-        self.only_on = tk.BooleanVar(value=False)
-        ttk.Checkbutton(flt, text='只看已勾選', variable=self.only_on, command=self._filter).pack(side='left', padx=6)
         self.count_lbl = ttk.Label(flt, text='', foreground='#555'); self.count_lbl.pack(side='right')
         tf = ttk.Frame(rec); tf.pack(fill='both', expand=True)
-        self.tree = ttk.Treeview(tf, columns=('on', 'name', 'min', 'id'), show='headings', height=10)
-        for c, t, w in (('on', '錄', 40), ('name', '名稱', 230), ('min', '分鐘', 50), ('id', '縮圖 id', 120)):
-            self.tree.heading(c, text=t); self.tree.column(c, width=w, anchor='center' if c in ('on', 'min') else 'w')
+        self.tree = ttk.Treeview(tf, columns=('name', 'min', 'id'), show='headings', height=10, selectmode='browse')
+        for c, t, w in (('name', '名稱', 240), ('min', '分鐘', 50), ('id', '縮圖 id', 120)):
+            self.tree.heading(c, text=t); self.tree.column(c, width=w, anchor='center' if c == 'min' else 'w')
         tsb = ttk.Scrollbar(tf, command=self.tree.yview); self.tree.configure(yscrollcommand=tsb.set)
         tsb.pack(side='right', fill='y'); self.tree.pack(fill='both', expand=True)
         self.tree.bind('<Double-1>', self._tree_dbl); self.tree.bind('<<TreeviewSelect>>', lambda e: self._show_thumb())
@@ -135,7 +133,6 @@ class Gui(tk.Tk):
         g.add_command(label='＋ 新增 slot', command=self._add_slot)
         g.add_command(label='刪除選取的遊戲', command=self._del_slot)
         g.add_command(label='測試尋找', command=self._test_find)
-        g.add_command(label='勾選樣本不足（自動勾未達目標局數的）', command=self._pick_low)
         g.add_separator()
         g.add_command(label=SCAN_LBL, command=self._scan_catalog)
         g.add_command(label='📖 賠率表', command=self._paytable)
@@ -193,24 +190,23 @@ class Gui(tk.Tk):
         self.tree.delete(*self.tree.get_children()); a = self.app(); self._all_ids = []
         if not a: return
         for r in a.slots():
-            self.tree.insert('', 'end', iid=r['id'], values=('✓' if r.get('enabled', '1') == '1' else '', r['name'], r['minutes'], r['id']))
+            self.tree.insert('', 'end', iid=r['id'], values=(r['name'], r['minutes'], r['id']))
             self._all_ids.append(r['id'])
         self._filter()
     def _filter(self):
-        """search box / 只看已勾選: detach rows that do not match (they stay in the list and are still saved)"""
+        """search box: detach rows that do not match (they stay in the list and are still saved)"""
         if not hasattr(self, '_all_ids'): return
         q = self.q_var.get().strip().lower().replace(' ', '_'); n = 0
         for k, i in enumerate(self._all_ids):
             if not self.tree.exists(i): continue
-            show = (not q or q in self.tree.set(i, 'name').lower() or q in i) and (not self.only_on.get() or self.tree.set(i, 'on'))
+            show = not q or q in self.tree.set(i, 'name').lower() or q in i
             if show: self.tree.reattach(i, '', k); n += 1
             else: self.tree.detach(i)
-        on = sum(1 for i in self._all_ids if self.tree.exists(i) and self.tree.set(i, 'on'))
-        self.count_lbl['text'] = f'顯示 {n} / 共 {len(self._all_ids)} 款，已勾 {on}'
+        self.count_lbl['text'] = f'顯示 {n} / 共 {len(self._all_ids)} 款'
     def _save_tree(self):
         a = self.app(); old = {r['id']: r for r in a.slots()}          # keep columns the list does not show (hint)
-        rows = [dict(old.get(i, {}), id=i, name=self.tree.set(i, 'name'), minutes=self.tree.set(i, 'min'),
-                     enabled='1' if self.tree.set(i, 'on') else '0') for i in self._all_ids if self.tree.exists(i)]
+        rows = [dict(old.get(i, {}), id=i, name=self.tree.set(i, 'name'), minutes=self.tree.set(i, 'min'))
+                for i in self._all_ids if self.tree.exists(i)]
         a.save_slots(rows); self._filter()
     def _show_thumb(self):
         sel = self.tree.selection(); a = self.app()
@@ -230,11 +226,10 @@ class Gui(tk.Tk):
         if self._locked(): return
         iid = self.tree.identify_row(e.y); col = self.tree.identify_column(e.x)
         if not iid: return
-        if col == '#1': self.tree.set(iid, 'on', '' if self.tree.set(iid, 'on') else '✓')
-        elif col == '#3':
+        if col == '#2':
             v = simpledialog.askinteger('分鐘', '錄幾分鐘？', initialvalue=int(float(self.tree.set(iid, 'min') or 60)), minvalue=1, maxvalue=600, parent=self)
             if v: self.tree.set(iid, 'min', v)
-        elif col == '#2':
+        elif col == '#1':
             v = simpledialog.askstring('名稱', '遊戲名稱（中英數字；中文名稱的影片檔名會用代號）', initialvalue=self.tree.set(iid, 'name'), parent=self)
             if v: self.tree.set(iid, 'name', re.sub(r'[^0-9A-Za-z_\-一-鿿()]+', '_', v))
         self._save_tree()
@@ -451,7 +446,7 @@ class Gui(tk.Tk):
         fields = [('ldplayer_dir', 'LDPlayer 資料夾（含 ldconsole.exe）'), ('ld_index', '主要模擬器編號（多開器裡的 index）'),
                   ('serial', '主要模擬器 adb 序號'), ('video_dir', '影片輸出資料夾'), ('spin_interval', 'Spin 間隔（秒）'),
                   ('adb', 'adb.exe（空白=自動）'), ('scrcpy', 'scrcpy.exe（空白=自動）'), ('ffmpeg', 'ffmpeg.exe（空白=自動）'),
-                  ('target_spins', '每款目標局數（總覽 / 勾選樣本不足用，預設 1000）'),
+                  ('target_spins', '每款目標局數（總覽用，預設 1000）'),
                   ('precise_pp', '夠準就停：RTP 95% 範圍 ± 幾個百分點（預設 10）'), ('precise_max_minutes', '夠準就停：每款最多錄幾分鐘（預設 240）')]
         vars_ = {}
         for i, (k, label) in enumerate(fields):
@@ -575,7 +570,7 @@ class Gui(tk.Tk):
         a = self.app(); idx = self.emu()
         if not a: return
         if not messagebox.askokcancel('掃描大廳找新遊戲', f'在模擬器 {self.emu_name(idx)} 把 {a.p["name"]} 的大廳從頭滑到尾（約 5~8 分鐘），\n'
-                                      '清單裡還沒有的遊戲會自動加入（不勾選；名字是讀圖猜的，可雙擊「名稱」修改）。\n期間請不要操作這台模擬器。', parent=self): return
+                                      '清單裡還沒有的遊戲會自動加入（名字是讀圖猜的，可雙擊「名稱」修改）。\n期間請不要操作這台模擬器。', parent=self): return
         self.log(f'--- 掃描 {a.p["name"]} 大廳（模擬器 {self.emu_name(idx)}）---')
         self.scanning = idx; self._scan_menu_enabled(False)
         def work():
@@ -658,7 +653,7 @@ class Gui(tk.Tk):
 
     # ---------------- run / schedule / stop ----------------
     def _checked(self):
-        return [i for i in self._all_ids if self.tree.exists(i) and self.tree.set(i, 'on')]   # incl. rows hidden by the search
+        return list(self.tree.selection())   # single highlighted row = the game to record
     def _preflight(self, idx, minutes):
         """#10: enough RAM / disk before starting another emulator job? -> True to go on"""
         probs = []
@@ -674,7 +669,7 @@ class Gui(tk.Tk):
         if not a: return
         if self.running(idx): messagebox.showinfo('開始錄製', f'模擬器 {self.emu_name(idx)} 已經在錄製中。要同時錄，請在上方換一台模擬器。', parent=self); return
         self._save_tree(); ids = self._checked()
-        if not ids: messagebox.showinfo('開始錄製', '請先勾選要錄的 slot（雙擊「錄」欄）', parent=self); return
+        if not ids: messagebox.showinfo('開始錄製', '請先在清單點一下要錄的遊戲', parent=self); return
         total = sum(float(self.tree.set(i, 'min') or 60) for i in ids)
         n = max(1, min(MAX_MULTI, int(self.n_var.get() or 1)))
         r = max(1, min(MAX_REPEAT, int(self.r_var.get() or 1)))
@@ -768,7 +763,7 @@ class Gui(tk.Tk):
         self._launch(idx, g['app'], g['slots'], f'{group}_c{c}_e{idx}', g['n'], group, g['precise'], keep=c < g['cycles'])
     def _schedule(self):
         v = simpledialog.askstring('定時開始', '幾點開始？（24 小時制，例如 22:30；已過的時間 = 明天）\n'
-                                   '會用「目前選的 App、模擬器、勾選的 slot」。時間到會自動開模擬器。GUI 視窗要保持開著。', parent=self)
+                                   '會用「目前選的 App、模擬器、選取的遊戲」。時間到會自動開模擬器。GUI 視窗要保持開著。', parent=self)
         if not v: return
         m = re.fullmatch(r'\s*(\d{1,2})[:：](\d{2})\s*', v)
         if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59: messagebox.showwarning('定時開始', '格式像 22:30', parent=self); return
@@ -925,37 +920,6 @@ class Gui(tk.Tk):
             except Exception as e:
                 say(f'報告失敗：{e!r}')
         self._bg(work)
-    def _pick_low(self):
-        """tick the games of this app that were recorded but have fewer spins than the target; minutes = estimate to reach it"""
-        a = self.app()
-        if not a or self._locked(): return
-        self.log('計算各款已錄局數…')
-        def work():
-            try:
-                from core import overview
-                overview.build([a.id], excel=False, say=lambda s: None)
-                with open(os.path.join(overview.videos_root(), 'overview.json'), encoding='utf-8') as f: data = json.load(f)
-                self.q.put(('lowpick', a.id, data))
-            except Exception as e: self.q.put(('log', f'計算失敗：{e!r}'))
-        self._bg(work)
-    def _apply_low(self, app_id, data):
-        a = self.app()
-        if not a or a.id != app_id: return
-        games = data['apps'].get(app_id, {}); target = data.get('target', 1000)
-        low = {k: g for k, g in games.items() if g['need'] > 0 and k in self._all_ids and self.tree.exists(k)}
-        if not low:
-            messagebox.showinfo('勾選樣本不足', f'已錄過的遊戲都達到 {target:,} 局了（沒錄過的不算）。', parent=self); return
-        mins = {k: min(600, max(10, -(-(g['est_minutes'] or 60) // 10) * 10)) for k, g in low.items()}
-        txt = '\n'.join(f'{g["name"]}：{g["spins"]:,} 局，差 {g["need"]:,} 局 → 錄 {mins[k]} 分鐘' for k, g in list(low.items())[:15])
-        if len(low) > 15: txt += f'\n…共 {len(low)} 款'
-        if not messagebox.askyesno('勾選樣本不足', f'目標每款 {target:,} 局。要勾選這 {len(low)} 款並設定補錄分鐘數嗎？\n'
-                                   f'（其他遊戲會取消勾選；分鐘數依目前每小時局數估算）\n\n{txt}', parent=self): return
-        for i in self._all_ids:
-            if not self.tree.exists(i): continue
-            self.tree.set(i, 'on', '✓' if i in low else '')
-            if i in low: self.tree.set(i, 'min', mins[i])
-        self._save_tree(); self.only_on.set(True); self._filter()
-        self.log(f'已勾選 {len(low)} 款樣本不足的遊戲，按 ▶ 開始錄製即可補錄（可配合「同時用 N 台」）')
     def _pack(self):
         self.log('--- 打包中（不含影片、log、本機設定）---')
         def work():
@@ -1007,7 +971,6 @@ class Gui(tk.Tk):
                 elif kind == 'crop': self._crop_dialog(item[1])
                 elif kind == 'tpl': self._tpl_dialog(item[1])
                 elif kind == 'emus': self._load_emus()
-                elif kind == 'lowpick': self._apply_low(item[1], item[2])
                 elif kind == 'multi_go':
                     _, group, got = item
                     g = self.groups.get(group)
