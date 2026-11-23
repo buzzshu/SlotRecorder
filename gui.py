@@ -107,6 +107,7 @@ class Gui(tk.Tk):
         ttk.Button(run, text='■ 停止此台', command=self._stop).pack(side='left', padx=(12, 4))
         ttk.Button(run, text='■ 全部停止', command=self._stop_all).pack(side='left')
         ttk.Button(run, text='💸 沒錢了·清除重跑', command=self._reset_now).pack(side='left', padx=(12, 0))
+        ttk.Button(run, text='✅ 開錄前自檢', command=self._selftest).pack(side='left', padx=(12, 0))
 
         ttk.Label(rec, text='錄製工作（每台模擬器一列；選一列再按「停止此台」）').grid(row=4, column=0, sticky='w', pady=(8, 0))
         cols = (('emu', '模擬器', 110), ('app', 'App', 110), ('cur', '目前', 240), ('prog', '進度', 120), ('state', '狀態', 130),
@@ -114,6 +115,8 @@ class Gui(tk.Tk):
         jtf = ttk.Frame(rec); jtf.grid(row=5, column=0, sticky='nsew')
         self.jt = ttk.Treeview(jtf, columns=[c for c, _, _ in cols], show='headings', height=3)
         for c, t, w in cols: self.jt.heading(c, text=t); self.jt.column(c, width=w, anchor='w')
+        self.jt.tag_configure('crit', foreground='#d00000')   # 已停止 / 需處理：紅字（vista 主題會忽略 tag 底色，改用文字色才顯色）
+        self.jt.tag_configure('warn', foreground='#cc6600')   # 處理中的小狀況：橘字
         jsb = ttk.Scrollbar(jtf, command=self.jt.yview); self.jt.configure(yscrollcommand=jsb.set)
         jsb.pack(side='right', fill='y'); self.jt.pack(side='left', fill='both', expand=True)
         self.bar = ttk.Progressbar(rec, maximum=100); self.bar.grid(row=6, column=0, sticky='ew', pady=(4, 0))
@@ -126,6 +129,7 @@ class Gui(tk.Tk):
         ob2 = ttk.Frame(rep); ob2.pack(fill='x', pady=(8, 0))
         ttk.Button(ob2, text='🎰 特色分布（選取遊戲的累積贏分分布）', command=self._feature_report).pack(side='left')
         ttk.Button(ob2, text='📂 開啟影片資料夾', command=self._open_videos).pack(side='left', padx=6)
+        ttk.Button(ob2, text='🧹 清理舊影片', command=self._cleanup_videos).pack(side='left')
         ttk.Label(rep, text='「🎰 特色分布」：先到「錄製」分頁的清單點選一款遊戲，再按這顆。數據會跨天 / 跨場次累積。',
                   foreground='#888').pack(anchor='w', pady=(12, 0))
 
@@ -855,6 +859,42 @@ class Gui(tk.Tk):
         self.log(f'--- 模擬器 {self.emu_name(idx)}：已要求「沒錢清除重跑」，最多約 5 秒後開始 ---'); self._refresh_jobs()
     def _open_videos(self):
         a = self.app(); os.startfile(video_dir(a.id if a else ''))
+    def _cleanup_videos(self):
+        """刪掉已分析成功、且超過 N 天的原始 .mp4（報告/統計/特色片段全留）。先列清單給使用者確認。"""
+        from core import cleanup
+        days = int(CFG.get('keep_video_days', 7))
+        vdirs = {video_dir(aid) for aid, _ in self.apps} or {video_dir('')}
+        items = []
+        for vd in vdirs: items += cleanup.purgeable(vd, days)
+        if not items:
+            messagebox.showinfo('清理舊影片', f'沒有可清理的影片。\n（條件：已分析成功、且超過 {days} 天的原始 .mp4）', parent=self); return
+        items.sort(key=lambda x: -x[1]); total = sum(sz for _, sz, _ in items)
+        preview = '\n'.join(f'• {os.path.basename(p)}（{sz / 1e9:.2f} GB，{age:.0f} 天前）' for p, sz, age in items[:8])
+        more = f'\n…另外還有 {len(items) - 8} 支' if len(items) > 8 else ''
+        if not messagebox.askyesno('清理舊影片',
+                f'找到 {len(items)} 支「已分析成功且超過 {days} 天」的原始影片，共 {total / 1e9:.1f} GB。\n'
+                f'只刪原始 .mp4，報告 / 統計 / 特色片段全部保留。\n\n{preview}{more}\n\n確定刪除嗎？', parent=self):
+            return
+        def work():
+            say = lambda s: self.q.put(('log', s))
+            n, freed = cleanup.purge([p for p, _, _ in items], say)
+            say(f'🧹 清理完成：刪了 {n} 支，釋出 {freed / 1e9:.1f} GB')
+        self._bg(work)
+    def _selftest(self):
+        """開錄前秒級自檢：工具 / 硬碟 / 記憶體 / 模擬器 / 選取遊戲的模板。不會啟動遊戲。"""
+        a = self.app()
+        if not a: messagebox.showinfo('開錄前自檢', '先選一個 App', parent=self); return
+        ids = list(self._checked()); n, r = self.n_var.get(), self.r_var.get()
+        mins = sum(float(self.tree.set(i, 'min') or 60) for i in ids)
+        need_disk = mins * max(1, n) * max(1, r) / 60 * 1.5 + 1 if ids else 0
+        need_ram = 4.5 * max(1, n) + 1
+        from core import selftest
+        rows = selftest.check(a, ids, [self.emu()], video_dir(a.id), need_disk, need_ram)
+        ok_all = all(ok for ok, _, _ in rows)
+        body = '\n'.join(('✓ ' if ok else '✗ ') + f'{label}：{detail}' for ok, label, detail in rows)
+        tip = '' if ids else '\n\n（未選遊戲：沒檢查模板。先在清單選取要錄的遊戲再按一次。）'
+        messagebox.showinfo('開錄前自檢' + ('' if ok_all else '（有問題）'),
+                            ('全部通過，可以開錄 👍' if ok_all else '有項目沒過，建議先處理：') + '\n\n' + body + tip, parent=self)
 
     # ---------------- analysis / pack ----------------
     def _analyze(self):
@@ -972,12 +1012,25 @@ class Gui(tk.Tk):
         after = sum(per.get(s, 0) for s in slots[xi:]) if xi else 0
         full_left = max(0, g.get('cycles', 1) - (g['done'].get(idx, 0) + 1)) * one
         return this_rem + after + full_left
+    @staticmethod
+    def _alert_level(j):
+        """哪些狀態要在工作表標色：crit=已停止/需你處理(紅)、warn=正在自己處理的小狀況(橘)、''=正常"""
+        note, state = j.get('note', ''), j.get('state', '')
+        if any(k in note for k in ('金幣不足', '硬碟快滿', '記憶體不足')) or state.startswith('結束：有 slot'):
+            return 'crit'
+        if state in ('卡住處理中', '金幣用完→重置帳號') or any(k in note for k in ('處理卡住', '重置帳號')):
+            return 'warn'
+        return ''
     def _refresh_jobs(self):
         keep = self.jt.selection()
         self.jt.delete(*self.jt.get_children())
+        alerts = 0
         for idx, j in sorted(self.jobs.items()):
             app_name = dict(self.apps).get(j.get('app'), j.get('app', ''))
-            self.jt.insert('', 'end', iid=str(idx), values=(self.emu_name(idx), app_name, self._cur_cell(idx, j),
+            lvl = self._alert_level(j)
+            if lvl: alerts += 1
+            self.jt.insert('', 'end', iid=str(idx), tags=((lvl,) if lvl else ()),
+                           values=(self.emu_name(idx), app_name, self._cur_cell(idx, j),
                            self._prog_cell(j), j.get('state', ''), j.get('pop', ''), j.get('off', ''),
                            j.get('live', ''), j.get('note', '')))
         keep = [k for k in keep if self.jt.exists(k)]
@@ -986,9 +1039,10 @@ class Gui(tk.Tk):
         if r:
             eta = max((self._job_eta_min(i, self.jobs[i]) for i in self.jobs if self.running(i) or self.jobs[i].get('prep')), default=0)
             prec = any(g.get('precise') for g in self.groups.values())        # whole batch finishes when the slowest emulator does
-            self.status['text'] = f'錄製中：{len(r)} 台' + (f' · 整批約剩 {self._fmt_min(eta)}' + ('（上限）' if prec else '') if eta > 0 else '')
+            base = f'錄製中：{len(r)} 台' + (f' · 整批約剩 {self._fmt_min(eta)}' + ('（上限）' if prec else '') if eta > 0 else '')
         else:
-            self.status['text'] = '有排程' if self.jobs else '待命'
+            base = '有排程' if self.jobs else '待命'
+        self.status['text'] = (f'⚠ {alerts} 台需要注意 · ' if alerts else '') + base
         cur = self.jobs.get(self._sel_job())
         self.bar['value'] = cur.get('prog', 0) if cur else 0
     def _tick(self):

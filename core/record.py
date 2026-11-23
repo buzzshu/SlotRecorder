@@ -457,7 +457,8 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
             flag = base + '.analyzing'                  # set BEFORE the spawn: a merge must not start the same analysis
             try:                                        # statistics in the background, low priority; next slot starts now
                 open(flag, 'w').close()
-                pr = subprocess.Popen([sys.executable, '-m', 'core.analyze', mp4], cwd=ROOT, stdout=subprocess.DEVNULL,
+                gate = str(max(1, int(CFG.get('analyze_concurrency', 2) or 2)))   # cap simultaneous analyses so a big batch doesn't thrash
+                pr = subprocess.Popen([sys.executable, '-m', 'core.analyze', mp4, '--gate', gate], cwd=ROOT, stdout=subprocess.DEVNULL,
                                       stderr=subprocess.DEVNULL, creationflags=_NOWIN | getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0))
                 with open(flag, 'w') as f: f.write(str(pr.pid))
                 log('analysis started in background ->', os.path.basename(base) + '_summary.html')

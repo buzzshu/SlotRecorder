@@ -268,17 +268,44 @@ def cut_features(mp4, feats, say=print, max_clips=60):
         f['clip'] = os.path.basename(out) + '/' + name + '.mp4'
     say(f'feature clips: {min(len(feats), max_clips)} -> {os.path.basename(out)}')
 
-def analyze(mp4, app_id=None, fps=4, say=print):
-    """analyse one video. A <video>.analyzing flag file exists while it runs (a merge waits for it instead of redoing it)."""
-    lock = mp4[:-4] + '.analyzing'
+def _active_runs(vdir, exclude=None):
+    """live <video>.analyzing_run markers = analyses past the gate and actually working right now"""
+    out = []
+    try: names = os.listdir(vdir)
+    except OSError: return out
+    for f in names:
+        if not f.endswith('.analyzing_run'): continue
+        p = os.path.join(vdir, f)
+        if exclude and os.path.abspath(p) == os.path.abspath(exclude): continue
+        if _lock_alive(p): out.append(p)
+    return out
+
+def _wait_for_slot(vdir, cap, own_run, say):
+    """block until fewer than `cap` other analyses are actively running (soft cap; the marker is made only after this)"""
+    told = False
+    while len(_active_runs(vdir, own_run)) >= cap:
+        if not told: say(f'分析佇列已滿（{cap} 個同時），排隊等候…'); told = True
+        time.sleep(5)
+
+def analyze(mp4, app_id=None, fps=4, say=print, gate=0):
+    """analyse one video. A <video>.analyzing flag file exists while it runs (a merge waits for it instead of redoing it).
+    gate>0: wait until fewer than `gate` analyses are actively running before starting the heavy work (keeps a big batch from thrashing)."""
+    base = mp4[:-4]; lock = base + '.analyzing'; run = base + '.analyzing_run'
     try:
         with open(lock, 'w') as f: f.write(str(os.getpid()))
     except OSError: lock = None
+    if gate and gate > 0:
+        _wait_for_slot(os.path.dirname(os.path.abspath(mp4)) or '.', gate, run, say)
+        try:
+            with open(run, 'w') as f: f.write(str(os.getpid()))
+        except OSError: run = None
+    else: run = None
     try: return _analyze(mp4, app_id, fps, say)
     finally:
-        if lock:
-            try: os.remove(lock)
-            except OSError: pass
+        for p in (run, lock):
+            if p:
+                try: os.remove(p)
+                except OSError: pass
 
 def _analyze(mp4, app_id=None, fps=4, say=print):
     base = mp4[:-4]
@@ -604,6 +631,7 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser(); ap.add_argument('videos', nargs='*'); ap.add_argument('--app'); ap.add_argument('--fps', type=float, default=4)
     ap.add_argument('--merge', action='store_true', help='videos of the same slot -> also one merged report')
     ap.add_argument('--group', help='merge every video of this multi-emulator run (needs --app)')
+    ap.add_argument('--gate', type=int, default=0, help='max analyses running at once (0 = no limit); extras queue')
     a = ap.parse_args()
     if a.group:
         if not a.app: raise SystemExit('--group needs --app')
@@ -611,7 +639,7 @@ if __name__ == '__main__':
         from .overview import safe_build
         safe_build([a.app]); sys.exit(0)
     for v in a.videos:
-        try: analyze(v, a.app, a.fps)
+        try: analyze(v, a.app, a.fps, gate=a.gate)
         except SystemExit as e: print(v, '->', e)
     if a.merge and len(a.videos) > 1:
         by_slot = {}
