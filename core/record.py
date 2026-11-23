@@ -186,7 +186,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
             if precise: log(f'夠準就停: earlier videos of this game give {len(live.prior)} spins')
         except Exception as e: log('live stats off:', repr(e))
     last_chk = last_snap = last_prog = last_meter = 0; last_betchk = time.time(); off_since = None; back_streak = 0
-    prev_sig = None; same_since = None; popup_times = []; last_reset_t = None; centre_taps = 0; bal_stuck_since = None
+    prev_sig = None; same_since = None; popup_times = []; last_reset_t = None; quick_resets = 0; centre_taps = 0; bal_stuck_since = None
     span = {}                                                  # current off-game span (video time + what was done)
     rep = {'x': (None, 0), 'spin': 0, 'ocr': (None, 0), 'skip': set()}
     feat = {'on': False}                                       # off-game win-celebration / feature / pick bonus -> keep sweeping (fast loop) to skip / resolve it
@@ -268,7 +268,11 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                         close_span(); close_seg(); status('reset', True)
                         if secs - recorded() < max(60, secs * 0.02): log('out of coins near the end -> finish'); break
                         if st['resets'] >= MAX_RESETS: raise RuntimeError(f'out of coins again after {MAX_RESETS} resets')
-                        level = max(p.get('reset_level', 1), 2 if (last_reset_t and now - last_reset_t < 300) else 1)
+                        # came back broke within 5 min -> the last reset did not actually refund (account bound to the
+                        # device / a signed-in Google account / the server). escalate: pm clear -> new androidid -> brand-new
+                        # emulator (level 3 = a device the game has never seen -> guaranteed fresh guest).
+                        quick_resets = quick_resets + 1 if (last_reset_t and now - last_reset_t < 300) else 0
+                        level = max(p.get('reset_level', 1), min(1 + quick_resets, 3))
                         log(f'LOW ON COINS -> reset level {level} ({st["resets"]+1}/{MAX_RESETS})')
                         st['resets'] += 1; last_reset_t = now; entered = False
                         for attempt in range(1 if mode == 'new_instance' else 2):   # never create two emulators in a row

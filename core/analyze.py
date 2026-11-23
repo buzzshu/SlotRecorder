@@ -41,8 +41,13 @@ def boot_rtp(mult, n=2000, seed=1, wins=None, bets=None):
     else: means = np.array([m[rng.integers(0, len(m), len(m))].mean() for _ in range(n)])
     return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
 
-BUCKETS = [(0, 0, '沒中'), (0, 1, '贏回不到 1 倍'), (1, 2, '1~2 倍'), (2, 5, '2~5 倍'), (5, 10, '5~10 倍'),
-           (10, 20, '10~20 倍'), (20, 50, '20~50 倍'), (50, 100, '50~100 倍'), (100, 1e18, '100 倍以上')]
+# win-size buckets, lut-pipeline convention: '= 0x' on its own, the rest half-open (lo, hi] named by the upper bound.
+# fine (1x-wide) up to 10x, then coarser so high multiples don't trail a row of near-empty bins.
+BUCKETS = [(0, 0, '= 0 倍（沒中）'),
+           (0, 1, '(0, 1] 倍'), (1, 2, '(1, 2] 倍'), (2, 3, '(2, 3] 倍'), (3, 4, '(3, 4] 倍'), (4, 5, '(4, 5] 倍'),
+           (5, 6, '(5, 6] 倍'), (6, 7, '(6, 7] 倍'), (7, 8, '(7, 8] 倍'), (8, 9, '(8, 9] 倍'), (9, 10, '(9, 10] 倍'),
+           (10, 15, '(10, 15] 倍'), (15, 20, '(15, 20] 倍'), (20, 30, '(20, 30] 倍'), (30, 50, '(30, 50] 倍'),
+           (50, 100, '(50, 100] 倍'), (100, 1e18, '> 100 倍')]
 
 def spin_stats(wins, bets):
     """RTP / hit rate / win-size distribution of a list of spins (one video, or several videos merged)"""
@@ -52,7 +57,7 @@ def spin_stats(wins, bets):
     hits = int((wins > 0).sum()); hlo, hhi = wilson(hits, n)
     dist = []
     for lo_, hi_, label in BUCKETS:
-        sel = (mult == 0) if hi_ == 0 else ((mult > 0) & (mult < hi_)) if lo_ == 0 else ((mult >= lo_) & (mult < hi_))
+        sel = (mult == 0) if hi_ == 0 else ((mult > lo_) & (mult <= hi_))   # lut half-open (lo, hi]: upper bound inclusive
         k = int(sel.sum())
         dist.append({'label': label, 'count': k, 'every_n': round(n / k, 1) if k else None, 'rtp_share': float(wins[sel].sum() / tot_bet)})
     return {'spins': n, 'total_bet': tot_bet, 'total_win': tot_win, 'rtp': tot_win / tot_bet, 'rtp_95': [lo, hi],

@@ -453,8 +453,10 @@ class App:
 
     def reset_account(self, level=1):
         """level 1: pm clear (new guest account). level 2: new androidid/imei + emulator reboot, then level 1.
-        profile reset 'new_instance': brand-new emulator (see reset_new_instance)."""
-        if self.p.get('reset') == 'new_instance': return self.reset_new_instance()
+        level 3: brand-new emulator (reset_new_instance) -- last resort when pm clear / new androidid keep coming back
+        broke (account bound to the device, a signed-in Google account, or the server, which level 1/2 can't shake off).
+        profile reset 'new_instance': always a brand-new emulator (see reset_new_instance)."""
+        if self.p.get('reset') == 'new_instance' or level >= 3: return self.reset_new_instance()
         if level >= 2 and not TOOLS['ldconsole']:
             log('WARNING: ldconsole.exe not found (設定 -> LDPlayer 資料夾) -> level-2 reset skipped, doing level 1')
         if level >= 2 and TOOLS['ldconsole']:

@@ -190,11 +190,10 @@ def write_excel(app_id, app_name, games, path, say=print):
             sh[f'G{k}'] = label
             if hi == 0:
                 sh[f'J{k}'] = '=COUNTIF(D:D,0)'; sh[f'L{k}'] = 0
-            else:
+            else:                                                      # lut half-open (lo, hi]: lower exclusive, upper inclusive
                 sh[f'H{k}'] = lo; sh[f'I{k}'] = hi if hi < 1e17 else 1e18
-                op = '>' if lo == 0 else '>='
-                sh[f'J{k}'] = f'=COUNTIFS(E:E,"{op}"&H{k},E:E,"<"&I{k},D:D,">0")'
-                sh[f'L{k}'] = f'=SUMIFS(D:D,E:E,"{op}"&H{k},E:E,"<"&I{k},D:D,">0")/SUM(C:C)'
+                sh[f'J{k}'] = f'=COUNTIFS(E:E,">"&H{k},E:E,"<="&I{k},D:D,">0")'
+                sh[f'L{k}'] = f'=SUMIFS(D:D,E:E,">"&H{k},E:E,"<="&I{k},D:D,">0")/SUM(C:C)'
             sh[f'K{k}'] = f'=IF(J{k}>0,COUNT(C:C)/J{k},"—")'
             sh[f'L{k}'].number_format = '0.0%'; sh[f'K{k}'].number_format = '0.0'
         sh.column_dimensions['A'].width = 42; sh.column_dimensions['G'].width = 16
