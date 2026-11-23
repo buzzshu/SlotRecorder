@@ -49,19 +49,26 @@ BUCKETS = [(0, 0, '= 0 倍（沒中）'),
            (10, 15, '(10, 15] 倍'), (15, 20, '(15, 20] 倍'), (20, 30, '(20, 30] 倍'), (30, 50, '(30, 50] 倍'),
            (50, 100, '(50, 100] 倍'), (100, 1e18, '> 100 倍')]
 
+def win_dist(mult, wins, tot_bet, denom):
+    """win-size distribution over BUCKETS (lut half-open (lo, hi], upper inclusive). denom = spins the 'every_n'
+    frequency divides by (pass the total paid spins so base and feature tables share one play-rate basis)."""
+    mult = np.asarray(mult, float); wins = np.asarray(wins, float); out = []
+    for lo_, hi_, label in BUCKETS:
+        sel = (mult == 0) if hi_ == 0 else ((mult > lo_) & (mult <= hi_))
+        k = int(sel.sum())
+        out.append({'label': label, 'count': k, 'every_n': round(denom / k, 1) if k else None,
+                    'rtp_share': float(wins[sel].sum() / tot_bet) if tot_bet else 0.0})
+    return out
+
 def spin_stats(wins, bets):
     """RTP / hit rate / win-size distribution of a list of spins (one video, or several videos merged)"""
     wins = np.asarray(wins, float); bets = np.asarray(bets, float); n = len(wins)
     mult = wins / bets; tot_bet = float(bets.sum()); tot_win = float(wins.sum())
     lo, hi = boot_rtp(mult, wins=wins, bets=bets) if len(np.unique(bets)) > 1 else boot_rtp(mult)
     hits = int((wins > 0).sum()); hlo, hhi = wilson(hits, n)
-    dist = []
-    for lo_, hi_, label in BUCKETS:
-        sel = (mult == 0) if hi_ == 0 else ((mult > lo_) & (mult <= hi_))   # lut half-open (lo, hi]: upper bound inclusive
-        k = int(sel.sum())
-        dist.append({'label': label, 'count': k, 'every_n': round(n / k, 1) if k else None, 'rtp_share': float(wins[sel].sum() / tot_bet)})
     return {'spins': n, 'total_bet': tot_bet, 'total_win': tot_win, 'rtp': tot_win / tot_bet, 'rtp_95': [lo, hi],
-            'hit_rate': hits / n, 'hit_95': [hlo, hhi], 'hit_every_n': round(n / hits, 2) if hits else None, 'distribution': dist}, mult
+            'hit_rate': hits / n, 'hit_95': [hlo, hhi], 'hit_every_n': round(n / hits, 2) if hits else None,
+            'distribution': win_dist(mult, wins, tot_bet, n)}, mult
 
 # ---------------- reading the video ----------------
 def video_size(path):
@@ -364,6 +371,13 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
                                            strict=[(t - 1, t + 1) for t, _, _ in jumps]), mp4, app_id, (), say)
     try: cut_features(mp4, feats, say)
     except Exception as e: say(f'feature clips failed: {e!r}')
+    # split the win-size distribution: a feature folds its whole payout onto the spin that triggered it, so those spins
+    # would otherwise dominate the high buckets. base = spins that did NOT trigger a feature; feature = each feature's
+    # total-payout multiple. counts of the two add up to n; their rtp shares add up to the overall RTP.
+    trig = {f['spin'] - 1 for f in feats}                    # f['spin'] is the 1-based index of the trigger spin
+    base_i = [i for i in range(n) if i not in trig]
+    base_dist = win_dist(mult[base_i], wins[base_i], tot_bet, n) if base_i else []
+    feat_dist = win_dist([f['x'] for f in feats], [f['win'] for f in feats], tot_bet, n) if feats else []
     summary = {
         'video': os.path.basename(mp4), 'app': prof['name'], 'slot': stats.get('name') or stats.get('slot'),
         'video_length': hms(vid_s), 'play_hours': round(play_h, 3), 'off_game': hms(off_s),
@@ -371,7 +385,8 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
         'spins': n, 'spins_per_hour': round(n / play_h), 'total_bet': tot_bet, 'total_win': tot_win,
         'rtp': rtp, 'rtp_95': [lo, hi], 'hit_rate': core['hit_rate'], 'hit_95': core['hit_95'], 'hit_every_n': core['hit_every_n'],
         'net_per_hour': (tot_win - tot_bet) / play_h, 'net_per_hour_in_bets': (tot_win - tot_bet) / bet / play_h,
-        'distribution': core['distribution'], 'group': stats.get('group') or '', 'emulator': stats.get('emulator'),
+        'distribution': core['distribution'], 'base_distribution': base_dist, 'feature_distribution': feat_dist,
+        'group': stats.get('group') or '', 'emulator': stats.get('emulator'),
         'top_wins': [{'time': hms(spins[i]['t']), 'win': float(wins[i]), 'x': float(mult[i])} for i in top if wins[i] > 0],
         'gifts': [{'time': hms(t), 'coins': c} for t, c in gifts], 'jumps': [{'time': hms(t), 'coins': c, 'why': w} for t, c, w in jumps],
         'multi_spin_steps': len(odd),
@@ -429,11 +444,28 @@ def _feat_html(s, merged=False):
     return ('<h3>特色遊戲（自動偵測）</h3>' + head +
             f"<table><tr><th>影片時間</th><th>長度</th><th>贏分倍數</th><th>贏分</th><th>片段</th></tr>{rows}</table>")
 
+def _dist_rows(dl, skip_zero=False):
+    return ''.join(f"<tr><td>{html.escape(d['label'])}</td><td>{d['count']:,}</td>"
+                   f"<td>{'每 %s 把' % d['every_n'] if d['every_n'] else '—'}</td><td>{d['rtp_share']:.1%}</td></tr>"
+                   for d in dl if not (skip_zero and d['label'].startswith('= 0')))
+
 def render_html(s):
     e = html.escape
     pct = lambda x: '—' if x is None else f'{x:.1%}'
-    rows = ''.join(f"<tr><td>{e(d['label'])}</td><td>{d['count']:,}</td><td>{'每 %s 把' % d['every_n'] if d['every_n'] else '—'}</td>"
-                   f"<td>{d['rtp_share']:.1%}</td></tr>" for d in s['distribution'])
+    rows = _dist_rows(s['distribution'])
+    th = '<tr><th>贏分</th><th>次數</th><th>頻率</th><th>佔 RTP</th></tr>'
+    if s.get('base_distribution') is not None:               # base game vs feature split (new reports)
+        base_rows = _dist_rows(s['base_distribution'])
+        feat_rows = _dist_rows(s.get('feature_distribution') or [], skip_zero=True)
+        feat_tbl = (f'<table>{th}{feat_rows}</table>' if feat_rows else '<p>此影片未偵測到特色。</p>')
+        dist_section = (
+            '<h3>贏分大小分布 — base game（未觸發特色的局）</h3>'
+            f'<table>{th}{base_rows}</table>'
+            '<h3>贏分大小分布 — 特色（整個特色的總贏分，以押注倍數計）</h3>'
+            '<p style="color:#666;margin:2px 0">特色觸發局整局歸在這裡；其 win 含該把自己的 base 連線獎（免費遊戲中途無扣注邊界可再切）。兩表次數相加＝總局數。</p>'
+            + feat_tbl)
+    else:                                                    # old report without the split -> single combined table
+        dist_section = f'<h3>贏分大小分布（以押注倍數計）</h3><table>{th}{rows}</table>'
     tops = ''.join(f"<tr><td>{t['time']}</td><td>{fmt(t['win'])}</td><td>{t['x']:,.1f} 倍</td></tr>" for t in s['top_wins'])
     gifts = ''.join(f"<tr><td>{g['time']}</td><td>{fmt(g['coins'])}</td><td>關彈窗時加的錢（不算贏分）</td></tr>" for g in s['gifts']) + \
             ''.join(f"<tr><td>{j['time']}</td><td>{fmt(j['coins'])}</td><td>{e(j['why'])}</td></tr>" for j in s['jumps'])
@@ -459,8 +491,7 @@ th{{background:#f3f3f3}}td:first-child,th:first-child{{text-align:left}}.big{{fo
 <tr><td>每小時輸贏</td><td>{fmt(s['net_per_hour'])}</td><td>約 {s['net_per_hour_in_bets']:,.0f} 注／小時</td></tr>
 <tr><td>總押注 / 總贏分</td><td>{fmt(s['total_bet'])} / {fmt(s['total_win'])}</td><td></td></tr>
 <tr><td>餘額</td><td>{fmt(s['balance_first'])} → {fmt(s['balance_last'])}</td><td>帳目核對差額 {fmt(s['balance_check'])}（應為 0）</td></tr></table>
-<h3>贏分大小分布（以押注倍數計）</h3>
-<table><tr><th>贏分</th><th>次數</th><th>頻率</th><th>佔 RTP</th></tr>{rows}</table>
+{dist_section}
 <h3>前 10 大獎（影片時間，可直接跳去看）</h3>
 <table><tr><th>影片時間</th><th>贏分</th><th>押注倍數</th></tr>{tops}</table>
 {_feat_html(s)}
