@@ -10,7 +10,7 @@ without one are matched by the name in the file name.
 import argparse, glob, html, json, math, os, re, shutil, subprocess, sys, tempfile, time
 import numpy as np
 from .config import CFG, ROOT, video_dir
-from .analyze import spin_stats, load_spins, hms, fmt, BUCKETS
+from .analyze import spin_stats, load_spins, hms, fmt, BUCKETS, trustworthy
 
 _NOWIN = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 TARGET = lambda: int(CFG.get('target_spins') or 1000)
@@ -50,21 +50,25 @@ def collect(app_id):
         when = f'{m[1]}-{m[2]}-{m[3]} {m[4]}:{m[5]}' if m else ''
         g = games.setdefault(key, {'id': key, 'name': names.get(key) or st.get('name') or fname, 'videos': [], 'spins': [],
                                    'feat_x': [], 'feat_known': False})
+        tr = trustworthy(s)                                    # low read rate / open balance -> listed but kept out of the pooled stats
+        sp = load_spins(base, feat=True)
         fs = s.get('features')
-        if fs is not None:
+        if tr and fs is not None:
             g['feat_known'] = True; g['feat_x'] += [x['x'] for x in fs.get('list') or []]
             g['feat_spins'] = g.get('feat_spins', 0) + s.get('spins', 0)
-        sp = load_spins(base, feat=True)
         g['videos'].append({'video': os.path.basename(base) + '.mp4', 'when': when, 'play_hours': s.get('play_hours', 0),
                             'video_s': st.get('video_s') or _secs(s.get('video_length')), 'spins': len(sp), 'rtp': s.get('rtp'), 'bet': s.get('bet'),
-                            'read': s.get('meter_read_rate'), 'emulator': st.get('emulator'), 'html': base + '_summary.html'})
-        g['spins'] += [(os.path.basename(base) + '.mp4', t, b, w, isf) for t, b, w, isf in sp]
+                            'read': s.get('meter_read_rate'), 'emulator': st.get('emulator'), 'html': base + '_summary.html', 'trust': tr})
+        if tr: g['spins'] += [(os.path.basename(base) + '.mp4', t, b, w, isf) for t, b, w, isf in sp]
     for g in games.values():
         n = len(g['spins'])
-        g['play_hours'] = sum(v['play_hours'] or 0 for v in g['videos'])
-        g['video_hours'] = sum(v['video_s'] for v in g['videos']) / 3600
+        good = [v for v in g['videos'] if v['trust']]
+        g['excluded'] = sum(1 for v in g['videos'] if not v['trust'])
+        g['excluded_spins'] = sum(v['spins'] for v in g['videos'] if not v['trust'])
+        g['play_hours'] = sum(v['play_hours'] or 0 for v in good)          # pooled stats use trusted videos only
+        g['video_hours'] = sum(v['video_s'] for v in good) / 3600
         g['last'] = max(v['when'] for v in g['videos'])
-        g['report'] = max(g['videos'], key=lambda v: v['when'])['html']
+        g['report'] = max((good or g['videos']), key=lambda v: v['when'])['html']
         if n:
             core, _ = spin_stats([w for _, _, _, w, _ in g['spins']], [b for _, _, b, _, _ in g['spins']])
             g.update({k: core[k] for k in ('rtp', 'rtp_95', 'hit_rate', 'hit_every_n', 'total_bet', 'total_win')})
@@ -128,7 +132,8 @@ def render(all_games, target):
             lo, hi = g.get('rtp_95') or (None, None)
             need = '✔ 已達標' if not g['need'] else f"差 {g['need']:,} 局" + (f"（約再錄 {g['est_minutes']} 分鐘）" if g['est_minutes'] else '')
             link = os.path.relpath(g['report'], videos_root()).replace(os.sep, '/')
-            rows.append(f"<tr class='{'ok' if not g['need'] else 'low'}'><td>{e(g['name'])}</td><td>{len(g['videos'])}</td>"
+            vcell = f"{len(g['videos'])}" + (f"<br><span style='color:#b45309'>排除 {g['excluded']}</span>" if g.get('excluded') else '')
+            rows.append(f"<tr class='{'ok' if not g['need'] else 'low'}'><td>{e(g['name'])}</td><td>{vcell}</td>"
                         f"<td>{g['video_hours']:.2f}</td><td>{g['play_hours']:.2f}</td><td>{g['n']:,}</td><td class=b>{pct(g.get('rtp'))}</td>"
                         f"<td>{pct(lo)} ~ {pct(hi)}</td><td>{'每 %s 把' % g['hit_every_n'] if g.get('hit_every_n') else '—'}</td>"
                         f"<td>{_feat_cell(g)}</td><td>{e(g['last'])}</td><td>{need}</td><td><a href='{e(link)}'>最新報告</a></td></tr>")
@@ -147,7 +152,8 @@ tr.ok td:nth-child(11){{color:#15803d}}</style>
 <h1>錄影總覽</h1><p>更新時間 {time.strftime('%Y-%m-%d %H:%M')}｜每款目標 {target:,} 局（局數少於目標時 RTP 範圍很寬，僅供參考）。
 樣本不足的排在前面；在 SlotRecorder 按「勾選樣本不足」可以一鍵勾選並設好補錄分鐘數。</p>
 {''.join(secs)}
-<p style="color:#888">RTP＝總贏分 ÷ 總押注（同一款的所有影片合計）；95% 範圍以每把重抽樣估計。
+<p style="color:#888">「排除 N」＝有 N 支影片因餘額讀取率過低或帳目對不上而<b>未納入</b> RTP／分布統計（影片本身仍在，報告可開）；門檻為 min_read_rate（預設 0.6）。
+RTP＝總贏分 ÷ 總押注（同一款的所有<b>納入</b>影片合計）；95% 範圍以每把重抽樣估計。
 特色遊戲＝自動偵測（某把贏分後超過 25 秒沒扣押注、畫面仍在遊戲中），「—」＝影片是舊版分析、還沒偵測過（按 📊 重新分析即可）。</p></html>"""
 
 # ---------------- Excel (live formulas) ----------------
@@ -190,7 +196,7 @@ def write_excel(app_id, app_name, games, path, say=print):
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = '總表'
     head = ['遊戲', '局數', '總押注', '總贏分', 'RTP', '中獎率', '每 N 把中一次', '遊戲中時數', '每小時局數', '影片數', '最近錄影',
             '目標局數', '還差局數', 'RTP 95% 下限（程式算）', 'RTP 95% 上限（程式算）', '工作表',
-            '特色次數（程式偵測）', '每 N 局觸發一次', '特色平均倍數（押注）']
+            '特色次數（程式偵測）', '每 N 局觸發一次', '特色平均倍數（押注）', '排除（讀取率低／帳不平）']
     ws.append(head); bold = Font(bold=True)
     for c in ws[1]: c.font = bold; c.fill = PatternFill('solid', fgColor='F3F3F3')
     ws['U1'] = '目標局數'; ws['V1'] = TARGET(); ws['U1'].font = bold                     # one cell -> change it, column M follows
@@ -213,10 +219,10 @@ def write_excel(app_id, app_name, games, path, say=print):
         ws.append([g['name'], f'=COUNT({q}!C:C)', f'=SUM({q}!C:C)', f'=SUM({q}!D:D)', f'=IF(C{r}>0,D{r}/C{r},0)',
                    f'=IF(B{r}>0,COUNTIF({q}!D:D,">0")/B{r},0)', f'=IF(F{r}>0,1/F{r},"—")', round(g['play_hours'], 3),
                    f'=IF(H{r}>0,B{r}/H{r},"—")', len(g['videos']), g['last'], '=$V$1', f'=MAX(0,L{r}-B{r})', lo, hi, sn,
-                   g.get('feat_n'), f'=IF(N(Q{r})>0,B{r}/Q{r},"—")', g.get('feat_avg_x')])
+                   g.get('feat_n'), f'=IF(N(Q{r})>0,B{r}/Q{r},"—")', g.get('feat_avg_x'), g.get('excluded') or 0])
         for col, fmtx in (('C', '#,##0'), ('D', '#,##0'), ('E', '0.0%'), ('F', '0.0%'), ('G', '0.00'), ('I', '0'), ('N', '0.0%'), ('O', '0.0%')):
             ws[f'{col}{r}'].number_format = fmtx
-    for col, w in zip('ABCDEFGHIJKLMNOPQRS', (40, 9, 16, 16, 8, 8, 12, 10, 10, 7, 17, 9, 9, 12, 12, 30, 10, 12, 12)): ws.column_dimensions[col].width = w
+    for col, w in zip('ABCDEFGHIJKLMNOPQRST', (40, 9, 16, 16, 8, 8, 12, 10, 10, 7, 17, 9, 9, 12, 12, 30, 10, 12, 12, 13)): ws.column_dimensions[col].width = w
     ws.freeze_panes = 'B2'
     tmp = os.path.join(os.path.dirname(path), f'~tmp{os.getpid()}.xlsx'); wb.save(tmp)
     try: os.replace(tmp, path)

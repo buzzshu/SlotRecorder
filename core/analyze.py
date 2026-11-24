@@ -134,6 +134,14 @@ def clean_jumps(vals, bet, fps):
         out.append(r)
     return out
 
+def trustworthy(summary):
+    """A video's pooled stats can be trusted when the balance meter was read well enough (>= min_read_rate, default 0.6)
+    AND analyze's balance bookkeeping closed (|balance_check| <= one bet). Untrusted videos are still listed and counted,
+    but kept out of the pooled RTP / win-size distribution so a few unreadable recordings don't skew the aggregate."""
+    rr = summary.get('meter_read_rate'); bchk = summary.get('balance_check'); bet = summary.get('bet')
+    thr = CFG.get('min_read_rate'); thr = float(thr) if thr is not None else 0.6   # explicit 0 = accept every read rate
+    return (rr is None or float(rr) >= thr) and (bchk is None or bet is None or abs(float(bchk)) <= float(bet) + 1e-6)
+
 def infer_bet(vals):
     """most common balance drop = the bet"""
     drops = {}
@@ -345,7 +353,21 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
     vals = stable_values(series)
     bet_inf, n_inf = infer_bet(vals)
     bet_ocr = max(set(b for _, b in bet_reads), key=[b for _, b in bet_reads].count) if bet_reads else None
-    bet = bet_inf or bet_ocr or stats.get('bet')
+    bet_rec = stats.get('bet')
+    # bet_inf (most common balance drop) is usually the bet, but on a noisy / low-read video it can latch onto a garbage
+    # drop (a misread balance, a sub-bet drop). Two independent sources are more trustworthy: the bet the recorder set and
+    # the on-screen bet meter. When those two agree, that IS the bet (bet_inf only matters when nothing else is known).
+    # When only the recorder bet is known, keep bet_inf unless it is wildly off (> 2x). No recorder bet (old recordings)
+    # -> original balance-drop-first behaviour, so this never regresses them.
+    _bi = f'{bet_inf:,}' if bet_inf else '無（讀不到餘額下降）'   # bet_inf is None when no clean drop was seen (low-read video)
+    if bet_ocr and bet_rec and bet_ocr == bet_rec and bet_inf != bet_rec:
+        say(f'bet 推斷 {_bi} 與押注欄＋錄製一致的 {bet_rec:,} 不符（讀取率 {read_ok:.0%}）→ 改用 {bet_rec:,}')
+        bet = bet_rec
+    elif bet_rec and bet_inf and not (0.5 <= bet_inf / bet_rec <= 2):
+        say(f'bet 推斷 {bet_inf:,} 與錄製設定 {bet_rec:,} 差太多（讀取率 {read_ok:.0%}，押注欄 {bet_ocr}）→ 改用錄製設定 {bet_rec:,}')
+        bet = bet_rec
+    else:
+        bet = bet_inf or bet_ocr or bet_rec
     if not bet: raise SystemExit('could not determine the bet (no balance drops found)')
     vals = clean_jumps(vals, bet, fps)
     n_inf = sum(1 for r0, r1 in zip(vals, vals[1:]) if r0[1] - r1[1] == bet)
