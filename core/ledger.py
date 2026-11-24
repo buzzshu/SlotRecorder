@@ -34,9 +34,6 @@ STATS = os.path.join(ROOT, 'stats')
 VID_COLS = ['video_id', 'date', 'app', 'slot', 'bet', 'spins', 'total_bet', 'play_hours',
             'features', 'meter_read_rate', 'balance_check', 'trustworthy']
 FEAT_COLS = ['video_id', 'date', 'bet', 'spin', 'seconds', 'win', 'x', 'trustworthy']
-# feature win as a multiple of the bet; last bucket is open-ended
-BUCKETS = [(0, 5), (5, 10), (10, 20), (20, 30), (30, 50), (50, 100), (100, 1e18)]
-BUCKET_LABEL = ['0-5x', '5-10x', '10-20x', '20-30x', '30-50x', '50-100x', '100x+']
 
 
 def _slug(name, slot=None):
@@ -218,9 +215,11 @@ def compute(slug, include_untrusted=False):
     play_h = sum(float(v['play_hours']) for v in vids if v.get('play_hours'))
     tot_bet = sum(float(v['total_bet']) for v in vids if v.get('total_bet'))
     n = len(xs)
+    from .analyze import BUCKETS                                # shared lut buckets: half-open (lo, hi], upper inclusive
     dist = []
-    for (lo, hi), lab in zip(BUCKETS, BUCKET_LABEL):
-        c = sum(1 for x in xs if lo <= x < hi)
+    for lo, hi, lab in BUCKETS:
+        if hi == 0: continue                                   # '= 0' bucket: a feature always wins, so skip it
+        c = sum(1 for x in xs if lo < x <= hi)
         dist.append({'range': lab, 'count': c, 'prob': c / n if n else 0})
     q = {}
     if n >= 4:
