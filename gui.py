@@ -1,6 +1,6 @@
 """SlotRecorder GUI — pick an app + emulator, tick slots, press 開始錄製. Several emulators can record at the same time.
 Also: add a slot (crop its lobby tile), add popup close-button / button templates, schedule, analyse videos, pack the tool."""
-import json, os, queue, re, shutil, subprocess, sys, threading, time
+import json, math, os, queue, re, shutil, subprocess, sys, threading, time
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 
@@ -125,6 +125,7 @@ class Gui(tk.Tk):
         ttk.Label(rep, text='錄完影片後在這裡看結果，報告會自動開啟。', foreground='#555').pack(anchor='w', pady=(2, 10))
         ob = ttk.Frame(rep); ob.pack(fill='x')
         ttk.Button(ob, text='📊 分析影片（挑影片算 RTP / 中獎率）', command=self._analyze).pack(side='left')
+        ttk.Button(ob, text='🔄 重新辨識全部（舊影片套新版報告）', command=self._reanalyze_all).pack(side='left', padx=6)
         ttk.Button(ob, text='📋 總覽（所有遊戲彙總）', command=self._overview).pack(side='left', padx=6)
         ob2 = ttk.Frame(rep); ob2.pack(fill='x', pady=(8, 0))
         ttk.Button(ob2, text='🎰 特色分布（選取遊戲的累積贏分分布）', command=self._feature_report).pack(side='left')
@@ -917,6 +918,42 @@ class Gui(tk.Tk):
             for f in fs:
                 h = f[:-4] + '_summary.html'
                 if os.path.exists(h) and os.path.getmtime(h) > time.time() - 3600: os.startfile(h)
+        self._bg(work)
+    def _reanalyze_all(self):
+        """Re-run analysis on every video of the selected app so old reports pick up the current buckets / tables.
+        Resumable: videos already on this version are skipped (unless the user picks 強制)."""
+        a = self.app()
+        if not a: messagebox.showinfo('重新辨識全部', '先選一個 App', parent=self); return
+        vd = video_dir(a.id)
+        try: vids = [f for f in os.listdir(vd) if f.endswith('.mp4') and not f.endswith('_clean.mp4')]
+        except OSError: vids = []
+        if not vids: messagebox.showinfo('重新辨識全部', '這個 App 還沒有影片', parent=self); return
+        cur = sec = 0                                                  # sec counts only the videos that will actually re-run
+        for f in vids:
+            base = os.path.join(vd, f[:-4])
+            try:
+                with open(base + '_summary.json', encoding='utf-8') as fh:
+                    if json.load(fh).get('analyzer_version') == VERSION: cur += 1; continue
+            except (OSError, ValueError): pass
+            try:
+                with open(base + '_stats.json', encoding='utf-8') as fh: sec += json.load(fh).get('video_s') or 0
+            except (OSError, ValueError): pass
+        todo = len(vids) - cur; est = max(1, math.ceil(sec / 3600 * 2))
+        r = messagebox.askyesnocancel('重新辨識全部',
+            f'{a.p["name"]}：共 {len(vids)} 支影片，{cur} 支已是最新版（v{VERSION}）。\n\n'
+            f'預估重跑 {todo} 支約 {est} 分鐘（每小時影片約 2 分鐘）。\n\n'
+            f'是 = 只重跑舊的 {todo} 支（可隨時關掉再按，會接續沒跑完的）\n'
+            f'否 = 強制全部 {len(vids)} 支重跑\n取消 = 不跑', parent=self)
+        if r is None: return
+        force = (r is False)
+        self.log(f'--- 重新辨識全部：{a.p["name"]}（{"強制全部" if force else f"舊的 {todo} 支"}）---')
+        def work():
+            cmd = [PY, '-u', '-m', 'core.analyze', '--reanalyze-all', '--app', a.id] + (['--force'] if force else [])
+            p = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=NOWIN,
+                                 env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+            for raw in p.stdout: self.q.put(('log', raw.decode('utf-8', 'replace')))
+            p.wait()
+            self.q.put(('log', '✅ 重新辨識完成，按「📋 總覽」看更新後的報告。\n'))
         self._bg(work)
     def _paytable(self):
         """selected game's paytable screenshots: open them, or (re)take them on the selected emulator"""

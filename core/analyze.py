@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 from .config import CFG, TOOLS, ROOT, video_dir
 from .ocr import read_number
+from .version import VERSION
 
 _NOWIN = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 W, H = 720, 1280
@@ -394,13 +395,15 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
                                                                    'x': f['x'], 'clip': f.get('clip')} for f in feats]),
         'balance_first': vals[0][1] if vals else None, 'balance_last': vals[-1][1] if vals else None,
         'meter_read_rate': round(read_ok, 3), 'analysis_seconds': round(time.time() - t_start),
+        'analyzer_version': VERSION,
     }
     # sanity: balance change must equal wins - bets + gifts + jumps (all derived from the same series -> checks the bookkeeping)
     summary['balance_check'] = (summary['balance_last'] - summary['balance_first']) - (tot_win - tot_bet + sum(c for _, c in gifts) + sum(c for _, c, _ in jumps))
     with open(base + '_spins.tsv', 'w', encoding='utf-8') as f:
-        f.write('spin\ttime\tt_sec\tbet\twin\tx_bet\tbalance_after\n')
+        f.write('spin\ttime\tt_sec\tbet\twin\tx_bet\tbalance_after\ttype\n')      # type: base / feature (trigger spin)
         for i, s in enumerate(spins, 1):
-            f.write(f"{i}\t{hms(s['t'])}\t{s['t']:.1f}\t{s['bet']}\t{s['win']:.0f}\t{s['win'] / bet:.2f}\t{s['bal']}\n")
+            f.write(f"{i}\t{hms(s['t'])}\t{s['t']:.1f}\t{s['bet']}\t{s['win']:.0f}\t{s['win'] / bet:.2f}\t{s['bal']}"
+                    f"\t{'feature' if (i - 1) in trig else 'base'}\n")
     with open(base + '_summary.json', 'w', encoding='utf-8') as f: json.dump(summary, f, indent=1, ensure_ascii=False)
     with open(base + '_summary.html', 'w', encoding='utf-8') as f: f.write(render_html(summary))
     try:                                                     # per-spin handoff for a downstream board recognizer (slot-video-recog / te-ldplayer)
@@ -538,14 +541,18 @@ def fresh_summary(mp4, app_id=None, say=print):
         with open(js, encoding='utf-8') as f: return json.load(f)
     return analyze(mp4, app_id, say=say)
 
-def load_spins(base):
-    """[(time, bet, win)] from <base>_spins.tsv"""
+def load_spins(base, feat=False):
+    """[(time, bet, win)] from <base>_spins.tsv. feat=True -> [(time, bet, win, is_feature)] where is_feature is
+    True/False from the 'type' column, or None when the file predates that column (old analysis -> type unknown)."""
     out = []
     with open(base + '_spins.tsv', encoding='utf-8') as f:
         next(f, None)
         for line in f:
             p = line.rstrip('\n').split('\t')
-            if len(p) >= 5: out.append((p[1], float(p[3]), float(p[4])))
+            if len(p) < 5: continue
+            if not feat: out.append((p[1], float(p[3]), float(p[4]))); continue
+            isf = (p[7] == 'feature') if len(p) >= 8 else None
+            out.append((p[1], float(p[3]), float(p[4]), isf))
     return out
 
 def merge(videos, out_base, app_id=None, say=print):
@@ -564,6 +571,16 @@ def merge(videos, out_base, app_id=None, say=print):
     allsp = [(os.path.basename(v), t, b, w) for v, _, rows, _ in parts for t, b, w in rows]
     top = sorted(range(n), key=lambda i: -mult[i])[:10]
     first = parts[0][1]
+    # base / feature split (same basis as a single video): mark each spin from its video's detected feature triggers,
+    # then bin non-trigger spins (base) and the feature total-payout multiples (feature) over the same buckets.
+    feat_flags, all_known = [], True
+    for v, s, rows, _ in parts:
+        all_known = all_known and (s.get('features') is not None)      # every part must be feature-aware, else a part's
+        trig = {x['spin'] - 1 for x in ((s.get('features') or {}).get('list') or [])}   # unlabelled feature wins would land in base
+        feat_flags += [(j in trig) for j in range(len(rows))]
+    wa = np.asarray(wins, float); fa = np.asarray(feat_flags, bool)
+    base_dist = win_dist(mult[~fa], wa[~fa], core['total_bet'], n) if (all_known and (~fa).any()) else None
+    feat_dist = win_dist(mult[fa], wa[fa], core['total_bet'], n) if all_known else None
     summary = {
         'merged': True, 'app': first['app'], 'group': first.get('group') or '',
         'slot': next((s['slot'] for _, s, _, _ in parts if s.get('slot')), None) or re.sub(r'^\d{8}_\d{6}_|_merged$', '', os.path.basename(out_base)),
@@ -577,12 +594,14 @@ def merge(videos, out_base, app_id=None, say=print):
         'top_wins': [{'video': allsp[i][0], 'time': allsp[i][1], 'win': allsp[i][3], 'x': float(mult[i])} for i in top if mult[i] > 0],
         'gifts_total': sum(sum(g['coins'] for g in s.get('gifts', [])) for _, s, _, _ in parts),
         'gifts_n': sum(len(s.get('gifts', [])) for _, s, _, _ in parts),
+        'base_distribution': base_dist, 'feature_distribution': feat_dist,
         'features': _merge_features(parts, n, core['total_bet']),
         'meter_read_rate': min(s['meter_read_rate'] for _, s, _, _ in parts),
     }
     with open(out_base + '_spins.tsv', 'w', encoding='utf-8') as f:
-        f.write('spin\tvideo\ttime\tbet\twin\tx_bet\n')
-        for i, (vn, t, b, w) in enumerate(allsp, 1): f.write(f'{i}\t{vn}\t{t}\t{b:.0f}\t{w:.0f}\t{w / b:.2f}\n')
+        f.write('spin\tvideo\ttime\tbet\twin\tx_bet\ttype\n')
+        for i, ((vn, t, b, w), isf) in enumerate(zip(allsp, feat_flags), 1):
+            f.write(f'{i}\t{vn}\t{t}\t{b:.0f}\t{w:.0f}\t{w / b:.2f}\t{"feature" if isf else "base"}\n')
     with open(out_base + '_summary.json', 'w', encoding='utf-8') as f: json.dump(summary, f, indent=1, ensure_ascii=False)
     with open(out_base + '_summary.html', 'w', encoding='utf-8') as f: f.write(render_merged_html(summary))
     _pdf(out_base + '_summary.html', say)
@@ -600,8 +619,17 @@ def _merge_features(parts, n, tot_bet):
 def render_merged_html(s):
     e = html.escape
     pct = lambda x: '—' if x is None else f'{x:.1%}'
-    rows = ''.join(f"<tr><td>{e(d['label'])}</td><td>{d['count']:,}</td><td>{'每 %s 把' % d['every_n'] if d['every_n'] else '—'}</td>"
-                   f"<td>{d['rtp_share']:.1%}</td></tr>" for d in s['distribution'])
+    dh = '<table><tr><th>贏分</th><th>次數</th><th>頻率</th><th>佔 RTP</th></tr>'
+    if s.get('base_distribution') is not None:
+        feat_n = sum(d['count'] for d in s['feature_distribution'])
+        feat_tbl = (dh + _dist_rows(s['feature_distribution'], skip_zero=True) + '</table>'
+                    '<p style="color:#888">特色那張略過「= 0 倍」（特色一定有贏分）。特色觸發局的贏分含該局自身的連線獎，無法再切開，'
+                    '所以特色列的是整個特色的總贏分倍數；兩張表的局數相加 = 總局數，佔 RTP 相加 = 總 RTP。</p>'
+                    if feat_n else '<p>這批影片沒有偵測到特色遊戲。</p>')
+        dist_section = ('<h3>贏分大小分布｜base game（未觸發特色的局，以押注倍數計）</h3>' + dh + _dist_rows(s['base_distribution']) + '</table>'
+                        '<h3>贏分大小分布｜特色（整個特色的總贏分，以押注倍數計）</h3>' + feat_tbl)
+    else:
+        dist_section = '<h3>贏分大小分布（以押注倍數計）</h3>' + dh + _dist_rows(s['distribution']) + '</table>'
     vids = ''.join(f"<tr><td>{e(v['video'])}</td><td>{e(str(v['emulator']))}</td><td>{v['video_length']}</td><td>{v['spins']:,}</td>"
                    f"<td>{pct(v['rtp'])}</td><td>{fmt(v['bet'])}</td><td>{v['meter_read_rate']:.0%}</td></tr>" for v in s['videos'])
     tops = ''.join(f"<tr><td>{e(t['video'])}</td><td>{t['time']}</td><td>{fmt(t['win'])}</td><td>{t['x']:,.1f} 倍</td></tr>" for t in s['top_wins'])
@@ -629,8 +657,7 @@ th{{background:#f3f3f3}}td:first-child,th:first-child{{text-align:left}}.big{{fo
 {_feat_html(s, merged=True)}
 <h3>各支影片</h3>
 <table><tr><th>影片</th><th>模擬器</th><th>長度</th><th>局數</th><th>RTP</th><th>押注</th><th>餘額讀取率</th></tr>{vids}</table>
-<h3>贏分大小分布（以押注倍數計）</h3>
-<table><tr><th>贏分</th><th>次數</th><th>頻率</th><th>佔 RTP</th></tr>{rows}</table>
+{dist_section}
 <h3>前 10 大獎（以押注倍數排序；哪支影片、影片時間）</h3>
 <table><tr><th>影片</th><th>影片時間</th><th>贏分</th><th>押注倍數</th></tr>{tops}</table>
 <h3>注意事項</h3><ul>{w}<li>單台的 RTP 會因帳號、時段不同而起伏；合併後局數較多，範圍較窄。</li>
@@ -663,12 +690,49 @@ def merge_group(group, app_id, say=print):
     if not by_slot: say(f'no videos of group {group} in {vdir}')
     return out
 
+def _is_current(summary_json):
+    """True if this per-video report was already made by the current analyzer version."""
+    try:
+        with open(summary_json, encoding='utf-8') as f: return json.load(f).get('analyzer_version') == VERSION
+    except (OSError, ValueError): return False
+
+def reanalyze_all(app_id, force=False, gate=0, say=print):
+    """Re-run analysis on every video of one app so old reports pick up the current buckets / tables, then rebuild
+    the per-run merged reports and the overview. Resumable: videos already on this version are skipped unless force."""
+    vdir = video_dir(app_id)
+    vids = [os.path.join(vdir, f) for f in sorted(os.listdir(vdir)) if f.endswith('.mp4') and not f.endswith('_clean.mp4')]
+    todo = [v for v in vids if force or not _is_current(v[:-4] + '_summary.json')]
+    say(f'重新辨識：{len(todo)} / {len(vids)} 支（{len(vids) - len(todo)} 支已是 v{VERSION}，跳過）')
+    for i, v in enumerate(todo, 1):
+        say(f'[{i}/{len(todo)}] {os.path.basename(v)}')
+        try: analyze(v, app_id, gate=gate, say=say)
+        except SystemExit as e: say(f'  {os.path.basename(v)} -> {e}')
+        except Exception as e: say(f'  {os.path.basename(v)} -> failed {e!r}')
+    groups = set()
+    for f in os.listdir(vdir):
+        if not f.endswith('_stats.json'): continue
+        try:
+            with open(os.path.join(vdir, f), encoding='utf-8') as fh: g = json.load(fh).get('group')
+            if g: groups.add(g)
+        except (OSError, ValueError): pass
+    for g in sorted(groups):
+        try: merge_group(g, app_id, say)
+        except Exception as e: say(f'merge group {g} -> {e!r}')
+    from .overview import safe_build
+    safe_build([app_id], say)
+    say(f'✅ 重新辨識完成：{len(todo)} 支已更新到 v{VERSION}')
+
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(); ap.add_argument('videos', nargs='*'); ap.add_argument('--app'); ap.add_argument('--fps', type=float, default=4)
     ap.add_argument('--merge', action='store_true', help='videos of the same slot -> also one merged report')
     ap.add_argument('--group', help='merge every video of this multi-emulator run (needs --app)')
     ap.add_argument('--gate', type=int, default=0, help='max analyses running at once (0 = no limit); extras queue')
+    ap.add_argument('--reanalyze-all', action='store_true', help='re-run every video of --app (skips ones already on this version unless --force), then re-merge + overview')
+    ap.add_argument('--force', action='store_true', help='with --reanalyze-all: redo even up-to-date videos')
     a = ap.parse_args()
+    if a.reanalyze_all:
+        if not a.app: raise SystemExit('--reanalyze-all needs --app')
+        reanalyze_all(a.app, force=a.force, gate=a.gate); sys.exit(0)
     if a.group:
         if not a.app: raise SystemExit('--group needs --app')
         merge_group(a.group, a.app)

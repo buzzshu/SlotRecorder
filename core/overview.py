@@ -54,11 +54,11 @@ def collect(app_id):
         if fs is not None:
             g['feat_known'] = True; g['feat_x'] += [x['x'] for x in fs.get('list') or []]
             g['feat_spins'] = g.get('feat_spins', 0) + s.get('spins', 0)
-        sp = load_spins(base)
+        sp = load_spins(base, feat=True)
         g['videos'].append({'video': os.path.basename(base) + '.mp4', 'when': when, 'play_hours': s.get('play_hours', 0),
                             'video_s': st.get('video_s') or _secs(s.get('video_length')), 'spins': len(sp), 'rtp': s.get('rtp'), 'bet': s.get('bet'),
                             'read': s.get('meter_read_rate'), 'emulator': st.get('emulator'), 'html': base + '_summary.html'})
-        g['spins'] += [(os.path.basename(base) + '.mp4', t, b, w) for t, b, w in sp]
+        g['spins'] += [(os.path.basename(base) + '.mp4', t, b, w, isf) for t, b, w, isf in sp]
     for g in games.values():
         n = len(g['spins'])
         g['play_hours'] = sum(v['play_hours'] or 0 for v in g['videos'])
@@ -66,7 +66,7 @@ def collect(app_id):
         g['last'] = max(v['when'] for v in g['videos'])
         g['report'] = max(g['videos'], key=lambda v: v['when'])['html']
         if n:
-            core, _ = spin_stats([w for *_, w in g['spins']], [b for _, _, b, _ in g['spins']])
+            core, _ = spin_stats([w for _, _, _, w, _ in g['spins']], [b for _, _, b, _, _ in g['spins']])
             g.update({k: core[k] for k in ('rtp', 'rtp_95', 'hit_rate', 'hit_every_n', 'total_bet', 'total_win')})
         g['n'] = n
         g['need'] = max(0, TARGET() - n)
@@ -166,6 +166,24 @@ def _sheet_name(name, used):
     while s.lower() in used: s = f'{base[:26]}_{k}'; k += 1
     used.add(s.lower()); return s
 
+def _dist_block(sh, r0, title, type_crit=None):
+    """win-size distribution as LIVE formulas, header on row r0, buckets below (cols G..L).
+    type_crit None = every spin; 'base'/'feature' adds the per-spin 類型 column (F) as a COUNTIFS/SUMIFS criterion."""
+    from openpyxl.styles import Font
+    tc = f',F:F,"{type_crit}"' if type_crit else ''
+    sh[f'G{r0}'] = title; sh[f'H{r0}'] = '下限'; sh[f'I{r0}'] = '上限'; sh[f'J{r0}'] = '次數'; sh[f'K{r0}'] = '頻率（每 N 把）'; sh[f'L{r0}'] = '佔 RTP'
+    for c in 'GHIJKL': sh[f'{c}{r0}'].font = Font(bold=True)
+    for k, (lo, hi, label) in enumerate(BUCKETS, start=r0 + 1):
+        sh[f'G{k}'] = label
+        if hi == 0:
+            sh[f'J{k}'] = f'=COUNTIFS(D:D,0{tc})'; sh[f'L{k}'] = 0
+        else:                                                      # lut half-open (lo, hi]: lower exclusive, upper inclusive
+            sh[f'H{k}'] = lo; sh[f'I{k}'] = hi if hi < 1e17 else 1e18
+            sh[f'J{k}'] = f'=COUNTIFS(E:E,">"&H{k},E:E,"<="&I{k},D:D,">0"{tc})'
+            sh[f'L{k}'] = f'=SUMIFS(D:D,E:E,">"&H{k},E:E,"<="&I{k},D:D,">0"{tc})/SUM(C:C)'
+        sh[f'K{k}'] = f'=IF(J{k}>0,COUNT(C:C)/J{k},"—")'           # frequency divides by every spin, so base/feature share one play-rate basis
+        sh[f'L{k}'].number_format = '0.0%'; sh[f'K{k}'].number_format = '0.0'
+
 def write_excel(app_id, app_name, games, path, say=print):
     openpyxl = _ensure_openpyxl(say)
     from openpyxl.styles import Font, PatternFill
@@ -179,24 +197,18 @@ def write_excel(app_id, app_name, games, path, say=print):
     used = {'總表'}
     for r, g in enumerate(sorted(games.values(), key=lambda g: g['name']), start=2):
         sn = _sheet_name(g['name'], used); sh = wb.create_sheet(sn); q = f"'{sn}'"
-        sh.append(['影片', '影片時間', '押注', '贏分', '押注倍數'])
+        sh.append(['影片', '影片時間', '押注', '贏分', '押注倍數', '類型'])
         for c in sh[1]: c.font = bold
-        for i, (v, t, b, w) in enumerate(g['spins'], start=2):
-            sh.append([v, t, b, w, f'=IF(C{i}>0,D{i}/C{i},0)'])
-        # distribution (live): count + share of RTP per win-size bucket, from column E
-        sh['G1'] = '贏分（押注倍數）'; sh['H1'] = '下限'; sh['I1'] = '上限'; sh['J1'] = '次數'; sh['K1'] = '頻率（每 N 把）'; sh['L1'] = '佔 RTP'
-        for c in ('G1', 'H1', 'I1', 'J1', 'K1', 'L1'): sh[c].font = bold
-        for k, (lo, hi, label) in enumerate(BUCKETS, start=2):
-            sh[f'G{k}'] = label
-            if hi == 0:
-                sh[f'J{k}'] = '=COUNTIF(D:D,0)'; sh[f'L{k}'] = 0
-            else:                                                      # lut half-open (lo, hi]: lower exclusive, upper inclusive
-                sh[f'H{k}'] = lo; sh[f'I{k}'] = hi if hi < 1e17 else 1e18
-                sh[f'J{k}'] = f'=COUNTIFS(E:E,">"&H{k},E:E,"<="&I{k},D:D,">0")'
-                sh[f'L{k}'] = f'=SUMIFS(D:D,E:E,">"&H{k},E:E,"<="&I{k},D:D,">0")/SUM(C:C)'
-            sh[f'K{k}'] = f'=IF(J{k}>0,COUNT(C:C)/J{k},"—")'
-            sh[f'L{k}'].number_format = '0.0%'; sh[f'K{k}'].number_format = '0.0'
-        sh.column_dimensions['A'].width = 42; sh.column_dimensions['G'].width = 16
+        for i, (v, t, b, w, isf) in enumerate(g['spins'], start=2):
+            sh.append([v, t, b, w, f'=IF(C{i}>0,D{i}/C{i},0)', 'feature' if isf else ('' if isf is None else 'base')])
+        # distribution (live): count + share of RTP per win-size bucket, from column E. 類型 (F) is known only after a
+        # re-analysis on v1.17+, so the base/feature split is shown only when every spin of this game is typed.
+        typed = bool(g['spins']) and all(f is not None for *_, f in g['spins'])
+        _dist_block(sh, 1, '贏分（押注倍數）｜全部')
+        if typed:
+            _dist_block(sh, 20, '贏分分布｜base game（未觸發特色的局）', 'base')
+            _dist_block(sh, 39, '贏分分布｜特色（整個特色的總贏分）', 'feature')
+        sh.column_dimensions['A'].width = 42; sh.column_dimensions['F'].width = 9; sh.column_dimensions['G'].width = 20
         lo, hi = g.get('rtp_95') or (None, None)
         ws.append([g['name'], f'=COUNT({q}!C:C)', f'=SUM({q}!C:C)', f'=SUM({q}!D:D)', f'=IF(C{r}>0,D{r}/C{r},0)',
                    f'=IF(B{r}>0,COUNTIF({q}!D:D,">0")/B{r},0)', f'=IF(F{r}>0,1/F{r},"—")', round(g['play_hours'], 3),
