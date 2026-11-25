@@ -3,6 +3,16 @@
 版號規則：`主版.次版.修正`。新功能 → 次版 +1；只修 bug → 修正 +1。
 版號寫在 `core/version.py`，GUI 標題列、log、打包檔名都會顯示。
 
+## 1.21.0 — 2026-11-25
+- **修正「特色大獎被誤判成 gift(外部加值)扣掉 RTP」** —— 低讀取率影片 RTP 嚴重假性偏低的真因。`build_spins` 原本:某段餘額跳升若「偵測到 0 個 spin(`n==0`)且時間落在 gift_window(靠關彈窗 tap 定義,關鍵字含 `GREAT`/`WHEEL`)」就當成外部加值(gift)扣掉、不算贏分。但**特色/大獎動畫在低讀取時 spin 全讀不到(`n==0`),結束又 tap 關大獎畫面** → 整筆派彩正好命中這條規則被扣掉。
+  - **鐵證**:一支 89 局影片餘額實際 `58,686,000,000 → 100,902,000,000`(淨賺 422 億),卻報 RTP 0.26;那兩筆被當 gift 的跳升是 **99 倍、178 倍 bet**(遊戲中段 @3:48 / @8:34),真 gift 實測最大才 12 倍。
+  - **修法**:加金額守門 —— 餘額跳升 **≥ `gift_max_x`(預設 15)× bet** 時一律算贏分,即使撞到 tap 也不當 gift(真加值有上限,特色大獎遠超過)。`CFG.gift_max_x` 可調。
+  - **驗證(本機重算)**:該 89 局影片 0.26 → **3.37**(精確等於 endpoint RTP `1 + 淨變化/總押注`);兩個大樣本雙向收斂到合理區間 —— **DragonTrio_MidnightStorm 1,235 局 76.7% → 99.1%**、**Spooky_Link_Mo_Mummy 12,304 局 168% → 90.9%**;51 支重算全部內部自洽(`|balance_check| ≤ 一注`、`rtp = total_win/total_bet`)。
+- **新增 `python -m core.recompute`** —— 不重錄、不重 OCR,直接用快取 `_meter.json`(餘額序列)+ `_stats.json`(taps/segments)重算,就地改寫每支 `_summary.json` / `_spins.tsv` / `_summary.html`,再跑 `python -m core.overview` 即套用。舊資料全部可就地修正。
+  - 用法:`python -m core.recompute`(全部)/ `... 88_fortunes`(單款)/ `... path/to/<base>_meter.json`(指定支)。
+  - 限制:`confirm_features` 需要 mp4,快取重算的特色是 gap-based 候選(不經逐幀確認),特色級統計為盡力估計;整體 RTP 因錨定頭尾餘額,精確。重算的 summary 標 `recomputed_from_cache: true`。
+- **重構**:`core/analyze.py` 把 bet 選擇 + `build_spins` + summary 組裝抽成共用的 `_reconstruct()` / `_summarize()`,`_analyze`(讀 mp4)與 `recompute`(讀快取)走同一條程式碼路徑,不會邏輯分岔。`_summarize(mp4=None)` 時跳過需要影片的 `confirm_features`/`cut_features`。
+
 ## 1.20.0 — 2026-11-25
 - **品質守門改成兩層**(接 1.18.0 的單層守門):以前只要讀取率 < `min_read_rate`(0.6)整支就被排除,連 RTP / 整體分布都不算。但實測發現「整體」數字其實撐得住更低的讀取率。
   - **Decimation 驗證**:拿讀取率 0.9 的影片當 ground truth(full-series 重建完全吻合存檔 summary),把餘額序列砍到 0.5(含隨機與**連續成塊**兩種,後者模擬特色動畫整段讀不到),結果——**整體 RTP 幾乎不動(±1~3.5pt)、局數保留 ~90–97%、整體贏分分布 L1 ≤ 0.05**;但**特色次數掉 ~40%、0.4 直接崩**,特色贏分分布不可信(特色正好發生在讀不到的那段)。

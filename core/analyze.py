@@ -195,6 +195,7 @@ def split_step(A, B, between, bet):
 def build_spins(series, vals, bet, gift_windows, seg_bounds):
     """walk balance transitions -> spins list + other events"""
     spins = []; gifts = []; jumps = []; odd = []
+    gmax = float(CFG.get('gift_max_x') or 15)               # a balance jump >= this * bet is a win (feature payout), never a gift
     def in_any(t, wins): return any(a <= t <= b for a, b in wins)
     for r0, r1 in zip(vals, vals[1:]):
         A, B, t1 = r0[1], r1[1], r1[0]
@@ -205,7 +206,8 @@ def build_spins(series, vals, bet, gift_windows, seg_bounds):
         if n > 20: jumps.append((t1, B - A, 'unexplained drop')); continue
         if n > 1: odd.append((t1, n))
         if win > 0 and (n == 0 or before):                  # win of the spin that was already running
-            if spins and not (n == 0 and in_any(t1, gift_windows)): spins[-1]['win'] += win; spins[-1]['bal'] = B
+            is_gift = n == 0 and in_any(t1, gift_windows) and win < gmax * bet   # small coin bump at a popup-dismiss tap; a big jump is a feature payout
+            if spins and not is_gift: spins[-1]['win'] += win; spins[-1]['bal'] = B
             else: gifts.append((t1, win))
             win = 0
         for k in range(n):
@@ -348,27 +350,9 @@ def analyze(mp4, app_id=None, fps=4, say=print, gate=0):
                 try: os.remove(p)
                 except OSError: pass
 
-def _analyze(mp4, app_id=None, fps=4, say=print):
-    base = mp4[:-4]
-    stats = {}
-    if os.path.exists(base + '_stats.json'):
-        with open(base + '_stats.json', encoding='utf-8') as f: stats = json.load(f)
-    app_id = app_id or stats.get('app') or os.path.basename(os.path.dirname(os.path.abspath(mp4)))
-    prof = json.load(open(os.path.join(ROOT, 'apps', app_id, 'profile.json'), encoding='utf-8'))
-    size = video_size(mp4)                                   # landscape slots are recorded as 1280x720 videos
-    boxes = (prof.get('landscape') or {}).get('meters') if size[0] > size[1] else prof.get('meters')
-    if not boxes or 'balance' not in boxes: raise SystemExit(f'{app_id}: profile has no meters.balance box for a {size[0]}x{size[1]} video')
-    t_start = time.time(); say(f'reading balance meter: {os.path.basename(mp4)}')
-    cache = base + '_meter.json'
-    c = None
-    if os.path.exists(cache) and os.path.getmtime(cache) > os.path.getmtime(mp4):
-        with open(cache) as f: c = json.load(f)
-        if c.get('boxes') != boxes or c.get('fps') != fps: c = None            # profile boxes / orientation changed
-    if c:
-        series, bet_reads = [tuple(x) for x in c['series']], [tuple(x) for x in c['bets']]
-    else:
-        series, bet_reads = read_series(mp4, boxes, fps, progress=lambda t: say(f'  {hms(t)} read'), size=size)
-        with open(cache, 'w') as f: json.dump({'fps': fps, 'boxes': boxes, 'series': series, 'bets': bet_reads}, f)
+def _reconstruct(series, bet_reads, stats, fps, say=print):
+    """balance series + recorder stats -> bet and the spin / gift / jump lists. No video needed, so both the full
+    analysis (from the mp4) and a recompute (from the cached _meter.json) share one code path and cannot drift."""
     read_ok = sum(1 for _, v in series if v is not None) / max(1, len(series))
     vals = stable_values(series)
     bet_inf, n_inf = infer_bet(vals)
@@ -391,7 +375,6 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
     if not bet: raise SystemExit('could not determine the bet (no balance drops found)')
     vals = clean_jumps(vals, bet, fps)
     n_inf = sum(1 for r0, r1 in zip(vals, vals[1:]) if r0[1] - r1[1] == bet)
-
     GIFT = ('CLAIM', 'GREAT', 'WHEEL', 'GIFT', 'BONUS', 'REWARD')
     gift_windows = [(t - 2, t + 12) for t, kind, label in (stats.get('taps') or [])
                     if kind == 'x' or (kind in ('btn', 'ocr') and any(g in str(label).upper() for g in GIFT))]
@@ -400,9 +383,16 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
     for _, dur in segl[:-1]:
         acc += dur; bounds.append((acc - 3, acc + 15))
     spins, gifts, jumps, odd = build_spins(series, vals, bet, gift_windows, bounds)
+    return {'read_ok': read_ok, 'vals': vals, 'bet': bet, 'bet_inf': bet_inf, 'n_inf': n_inf, 'bet_ocr': bet_ocr,
+            'gift_windows': gift_windows, 'bounds': bounds, 'spins': spins, 'gifts': gifts, 'jumps': jumps, 'odd': odd}
+
+def _summarize(base, prof, stats, series, R, mp4, app_id, t_start, say=print):
+    """build the summary dict from a reconstruction R. mp4 given -> features are frame-confirmed and clipped; mp4 None
+    (recompute from cache) -> features are the gap-based candidates without frame confirmation. Returns (summary, trig)."""
+    read_ok, vals, bet = R['read_ok'], R['vals'], R['bet']
+    gift_windows, spins, gifts, jumps, odd = R['gift_windows'], R['spins'], R['gifts'], R['jumps'], R['odd']
     n = len(spins)
     if n == 0: raise SystemExit('no spins found')
-
     wins = np.array([s['win'] for s in spins], float)
     core, mult = spin_stats(wins, [bet] * n)
     tot_bet, tot_win, rtp = core['total_bet'], core['total_win'], core['rtp']; lo, hi = core['rtp_95']
@@ -410,10 +400,12 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
     off_s = sum(b - a for a, b, _ in (stats.get('timeline') or []))
     play_h = max(1e-6, (vid_s - off_s) / 3600)
     top = sorted(range(n), key=lambda i: -wins[i])[:10]
-    feats = confirm_features(find_features(spins, bet, off_spans(stats) + list(gift_windows), series=series,
-                                           strict=[(t - 1, t + 1) for t, _, _ in jumps]), mp4, app_id, (), say)
-    try: cut_features(mp4, feats, say)
-    except Exception as e: say(f'feature clips failed: {e!r}')
+    feats = find_features(spins, bet, off_spans(stats) + list(gift_windows), series=series,
+                          strict=[(t - 1, t + 1) for t, _, _ in jumps])
+    if mp4:                                                  # frame-confirm + clip only when the video is on hand
+        feats = confirm_features(feats, mp4, app_id, (), say)
+        try: cut_features(mp4, feats, say)
+        except Exception as e: say(f'feature clips failed: {e!r}')
     # split the win-size distribution: a feature folds its whole payout onto the spin that triggered it, so those spins
     # would otherwise dominate the high buckets. base = spins that did NOT trigger a feature; feature = each feature's
     # total-payout multiple. counts of the two add up to n; their rtp shares add up to the overall RTP.
@@ -422,9 +414,10 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
     base_dist = win_dist(mult[base_i], wins[base_i], tot_bet, n) if base_i else []
     feat_dist = win_dist([f['x'] for f in feats], [f['win'] for f in feats], tot_bet, n) if feats else []
     summary = {
-        'video': os.path.basename(mp4), 'app': prof['name'], 'slot': stats.get('name') or stats.get('slot'),
+        'video': os.path.basename(mp4) if mp4 else (stats.get('file') or os.path.basename(base) + '.mp4'),
+        'app': prof['name'], 'slot': stats.get('name') or stats.get('slot'),
         'video_length': hms(vid_s), 'play_hours': round(play_h, 3), 'off_game': hms(off_s),
-        'bet': bet, 'bet_check': {'from_balance_drops': bet_inf, 'drops_seen': n_inf, 'from_bet_meter': bet_ocr, 'recorder': stats.get('bet')},
+        'bet': bet, 'bet_check': {'from_balance_drops': R['bet_inf'], 'drops_seen': R['n_inf'], 'from_bet_meter': R['bet_ocr'], 'recorder': stats.get('bet')},
         'spins': n, 'spins_per_hour': round(n / play_h), 'total_bet': tot_bet, 'total_win': tot_win,
         'rtp': rtp, 'rtp_95': [lo, hi], 'hit_rate': core['hit_rate'], 'hit_95': core['hit_95'], 'hit_every_n': core['hit_every_n'],
         'net_per_hour': (tot_win - tot_bet) / play_h, 'net_per_hour_in_bets': (tot_win - tot_bet) / bet / play_h,
@@ -441,11 +434,41 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
     }
     # sanity: balance change must equal wins - bets + gifts + jumps (all derived from the same series -> checks the bookkeeping)
     summary['balance_check'] = (summary['balance_last'] - summary['balance_first']) - (tot_win - tot_bet + sum(c for _, c in gifts) + sum(c for _, c, _ in jumps))
-    with open(base + '_spins.tsv', 'w', encoding='utf-8') as f:
+    return summary, trig
+
+def write_spins_tsv(path, spins, bet, trig):
+    """per-spin table shared by the full analysis and the from-cache recompute (one format, no drift)."""
+    with open(path, 'w', encoding='utf-8') as f:
         f.write('spin\ttime\tt_sec\tbet\twin\tx_bet\tbalance_after\ttype\n')      # type: base / feature (trigger spin)
         for i, s in enumerate(spins, 1):
             f.write(f"{i}\t{hms(s['t'])}\t{s['t']:.1f}\t{s['bet']}\t{s['win']:.0f}\t{s['win'] / bet:.2f}\t{s['bal']}"
                     f"\t{'feature' if (i - 1) in trig else 'base'}\n")
+
+def _analyze(mp4, app_id=None, fps=4, say=print):
+    base = mp4[:-4]
+    stats = {}
+    if os.path.exists(base + '_stats.json'):
+        with open(base + '_stats.json', encoding='utf-8') as f: stats = json.load(f)
+    app_id = app_id or stats.get('app') or os.path.basename(os.path.dirname(os.path.abspath(mp4)))
+    prof = json.load(open(os.path.join(ROOT, 'apps', app_id, 'profile.json'), encoding='utf-8'))
+    size = video_size(mp4)                                   # landscape slots are recorded as 1280x720 videos
+    boxes = (prof.get('landscape') or {}).get('meters') if size[0] > size[1] else prof.get('meters')
+    if not boxes or 'balance' not in boxes: raise SystemExit(f'{app_id}: profile has no meters.balance box for a {size[0]}x{size[1]} video')
+    t_start = time.time(); say(f'reading balance meter: {os.path.basename(mp4)}')
+    cache = base + '_meter.json'
+    c = None
+    if os.path.exists(cache) and os.path.getmtime(cache) > os.path.getmtime(mp4):
+        with open(cache) as f: c = json.load(f)
+        if c.get('boxes') != boxes or c.get('fps') != fps: c = None            # profile boxes / orientation changed
+    if c:
+        series, bet_reads = [tuple(x) for x in c['series']], [tuple(x) for x in c['bets']]
+    else:
+        series, bet_reads = read_series(mp4, boxes, fps, progress=lambda t: say(f'  {hms(t)} read'), size=size)
+        with open(cache, 'w') as f: json.dump({'fps': fps, 'boxes': boxes, 'series': series, 'bets': bet_reads}, f)
+    R = _reconstruct(series, bet_reads, stats, fps, say)
+    summary, trig = _summarize(base, prof, stats, series, R, mp4, app_id, t_start, say)
+    spins, bet = R['spins'], R['bet']
+    write_spins_tsv(base + '_spins.tsv', spins, bet, trig)
     with open(base + '_summary.json', 'w', encoding='utf-8') as f: json.dump(summary, f, indent=1, ensure_ascii=False)
     with open(base + '_summary.html', 'w', encoding='utf-8') as f: f.write(render_html(summary))
     try:                                                     # per-spin handoff for a downstream board recognizer (slot-video-recog / te-ldplayer)
@@ -455,8 +478,9 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
         from .ledger import add as _ledger; _ledger(base + '_summary.json', say)
     except Exception as e: say(f'ledger not updated: {e!r}')
     _pdf(base + '_summary.html', say)
-    say(f'spins {n}  RTP {rtp:.1%} ({lo and f"{lo:.0%}"}~{hi and f"{hi:.0%}"})  hit 1/{summary["hit_every_n"]}  '
-        f'bet {bet:,}  read {read_ok:.0%}  -> {os.path.basename(base)}_summary.html')
+    lo, hi = summary['rtp_95']
+    say(f'spins {summary["spins"]}  RTP {summary["rtp"]:.1%} ({lo and f"{lo:.0%}"}~{hi and f"{hi:.0%}"})  hit 1/{summary["hit_every_n"]}  '
+        f'bet {bet:,}  read {R["read_ok"]:.0%}  -> {os.path.basename(base)}_summary.html')
     return summary
 
 def _pdf(html_path, say):
