@@ -10,7 +10,7 @@ without one are matched by the name in the file name.
 import argparse, glob, html, json, math, os, re, shutil, subprocess, sys, tempfile, time
 import numpy as np
 from .config import CFG, ROOT, video_dir
-from .analyze import spin_stats, load_spins, hms, fmt, BUCKETS, trustworthy
+from .analyze import spin_stats, load_spins, hms, fmt, BUCKETS, trust_overall, trust_feature
 
 _NOWIN = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 TARGET = lambda: int(CFG.get('target_spins') or 1000)
@@ -50,21 +50,22 @@ def collect(app_id):
         when = f'{m[1]}-{m[2]}-{m[3]} {m[4]}:{m[5]}' if m else ''
         g = games.setdefault(key, {'id': key, 'name': names.get(key) or st.get('name') or fname, 'videos': [], 'spins': [],
                                    'feat_x': [], 'feat_known': False})
-        tr = trustworthy(s)                                    # low read rate / open balance -> listed but kept out of the pooled stats
+        to = trust_overall(s); tf = trust_feature(s)           # two tiers: overall stats survive ~0.5, features need >=0.6
         sp = load_spins(base, feat=True)
         fs = s.get('features')
-        if tr and fs is not None:
+        if tf and fs is not None:                              # feature stats only from feature-grade reads
             g['feat_known'] = True; g['feat_x'] += [x['x'] for x in fs.get('list') or []]
             g['feat_spins'] = g.get('feat_spins', 0) + s.get('spins', 0)
         g['videos'].append({'video': os.path.basename(base) + '.mp4', 'when': when, 'play_hours': s.get('play_hours', 0),
                             'video_s': st.get('video_s') or _secs(s.get('video_length')), 'spins': len(sp), 'rtp': s.get('rtp'), 'bet': s.get('bet'),
-                            'read': s.get('meter_read_rate'), 'emulator': st.get('emulator'), 'html': base + '_summary.html', 'trust': tr})
-        if tr: g['spins'] += [(os.path.basename(base) + '.mp4', t, b, w, isf) for t, b, w, isf in sp]
+                            'read': s.get('meter_read_rate'), 'emulator': st.get('emulator'), 'html': base + '_summary.html', 'trust': to, 'trust_feat': tf})
+        if to: g['spins'] += [(os.path.basename(base) + '.mp4', t, b, w, isf) for t, b, w, isf in sp]   # overall pool
     for g in games.values():
         n = len(g['spins'])
-        good = [v for v in g['videos'] if v['trust']]
-        g['excluded'] = sum(1 for v in g['videos'] if not v['trust'])
+        good = [v for v in g['videos'] if v['trust']]          # overall-trusted (read >= 0.5)
+        g['excluded'] = sum(1 for v in g['videos'] if not v['trust'])                         # fully out (read < 0.5 / books open)
         g['excluded_spins'] = sum(v['spins'] for v in g['videos'] if not v['trust'])
+        g['feat_excluded'] = sum(1 for v in g['videos'] if v['trust'] and not v['trust_feat'])  # overall in, feature dropped (0.5~0.6)
         g['play_hours'] = sum(v['play_hours'] or 0 for v in good)          # pooled stats use trusted videos only
         g['video_hours'] = sum(v['video_s'] for v in good) / 3600
         g['last'] = max(v['when'] for v in g['videos'])
@@ -119,9 +120,11 @@ class _Lock:
 
 # ---------------- HTML ----------------
 def _feat_cell(g):
-    if g.get('feat_n') is None: return '—'
-    if not g['feat_n']: return '0 次'
-    return f"每 {g['feat_every']} 局 / 平均 {g['feat_avg_x']} 倍"
+    if g.get('feat_n') is None: base = '—'
+    elif not g['feat_n']: base = '0 次'
+    else: base = f"每 {g['feat_every']} 局 / 平均 {g['feat_avg_x']} 倍"
+    fx = g.get('feat_excluded') or 0
+    return base + (f"<br><span style='color:#b45309'>特色略 {fx} 支</span>" if fx else '')   # read 0.5~0.6: overall kept, feature dropped
 
 # ---- win-size distribution line charts (inline SVG, print-safe) ----
 _WIN_BUCKETS = [(lo, hi, lab) for lo, hi, lab in BUCKETS if hi != 0]     # drop '= 0 沒中': both charts show win-size shape only
@@ -232,7 +235,8 @@ h3.disth{{font-size:14px;margin:18px 0 6px}}
 <h1>錄影總覽</h1><p>更新時間 {time.strftime('%Y-%m-%d %H:%M')}｜每款目標 {target:,} 局（局數少於目標時 RTP 範圍很寬，僅供參考）。
 樣本不足的排在前面；在 SlotRecorder 按「勾選樣本不足」可以一鍵勾選並設好補錄分鐘數。</p>
 {''.join(secs)}
-<p style="color:#888">「排除 N」＝有 N 支影片因餘額讀取率過低或帳目對不上而<b>未納入</b> RTP／分布統計（影片本身仍在，報告可開）；門檻為 min_read_rate（預設 0.6）。
+<p style="color:#888">兩層品質守門：<b>整體</b>數字（RTP／中獎率／整體分布／局數）經實測到讀取率 0.5 仍穩，門檻 min_read_rate_overall（預設 0.5）；<b>特色</b>數字（次數／特色分布）在低讀取下會漏（特色動畫那段正好讀不到），門檻較嚴 min_read_rate（預設 0.6），兩者都要帳目對得上（<code>|balance_check| ≤ 一注</code>）。
+「排除 N」＝N 支讀取率 &lt; 0.5 或帳不平，<b>整體與特色都未納入</b>（影片仍在，報告可開）。「特色略 M」＝M 支讀取率 0.5~0.6：整體仍納入、只有特色不納入。
 RTP＝總贏分 ÷ 總押注（同一款的所有<b>納入</b>影片合計）；95% 範圍以每把重抽樣估計。
 特色遊戲＝自動偵測（某把贏分後超過 25 秒沒扣押注、畫面仍在遊戲中），「—」＝影片是舊版分析、還沒偵測過（按 📊 重新分析即可）。</p></html>"""
 

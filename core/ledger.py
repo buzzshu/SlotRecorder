@@ -120,8 +120,8 @@ def add(path, say=print, force=False):
     bet = s.get('bet')
     bchk = s.get('balance_check')
     read_rate = s.get('meter_read_rate')
-    from .analyze import trustworthy
-    trust = trustworthy(s)                                      # shared definition: read rate >= min_read_rate AND balance closed
+    from .analyze import trust_feature
+    trust = trust_feature(s)                                    # ledger stores features -> feature-grade bar (read >= min_read_rate, balance closed)
     feats = (s.get('features') or {}).get('list') or []
     with _Lock(slug):
         have = {r['video_id'] for r in _read_tsv(vpath)}

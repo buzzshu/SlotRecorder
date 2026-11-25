@@ -134,13 +134,33 @@ def clean_jumps(vals, bet, fps):
         out.append(r)
     return out
 
-def trustworthy(summary):
-    """A video's pooled stats can be trusted when the balance meter was read well enough (>= min_read_rate, default 0.6)
-    AND analyze's balance bookkeeping closed (|balance_check| <= one bet). Untrusted videos are still listed and counted,
-    but kept out of the pooled RTP / win-size distribution so a few unreadable recordings don't skew the aggregate."""
-    rr = summary.get('meter_read_rate'); bchk = summary.get('balance_check'); bet = summary.get('bet')
-    thr = CFG.get('min_read_rate'); thr = float(thr) if thr is not None else 0.6   # explicit 0 = accept every read rate
-    return (rr is None or float(rr) >= thr) and (bchk is None or bet is None or abs(float(bchk)) <= float(bet) + 1e-6)
+def _books_closed(summary):
+    """analyze's balance bookkeeping closed: |balance_check| <= one bet (or either is unknown)."""
+    bchk = summary.get('balance_check'); bet = summary.get('bet')
+    return bchk is None or bet is None or abs(float(bchk)) <= float(bet) + 1e-6
+
+def _read_ge(summary, thr):
+    rr = summary.get('meter_read_rate')
+    return rr is None or float(rr) >= thr                      # explicit threshold 0 accepts any read rate
+
+def trust_overall(summary):
+    """Pool this video's RTP / hit rate / spin count / OVERALL win-size distribution. A decimation test (drop a
+    good video's balance reads down to 0.5, even in bursty chunks) showed these barely move — RTP within ~1-3pt,
+    the win-size distribution within L1 ~0.05 — so the bar is min_read_rate_overall (default 0.5) AND the balance
+    books closed. Feature stats do NOT survive that low -> trust_feature."""
+    thr = CFG.get('min_read_rate_overall'); thr = float(thr) if thr is not None else 0.5
+    return _read_ge(summary, thr) and _books_closed(summary)
+
+def trust_feature(summary):
+    """Pool this video's FEATURE stats (count / feature win-size distribution). Features play out in exactly the
+    obscured (animation) spans, so a low-read video loses them — the same decimation test collapsed feature count
+    by ~40% at 0.5 and to ~zero at 0.4. So features keep the higher bar: min_read_rate (default 0.6).
+    Built on top of trust_overall so trust_feature(v) ALWAYS implies trust_overall(v) — even if a custom config
+    sets min_read_rate_overall above min_read_rate (the feature bar then becomes the max of the two)."""
+    thr = CFG.get('min_read_rate'); thr = float(thr) if thr is not None else 0.6
+    return trust_overall(summary) and _read_ge(summary, thr)
+
+trustworthy = trust_feature          # backward-compat alias: the original single gate was exactly this 0.6 bar
 
 def infer_bet(vals):
     """most common balance drop = the bet"""
