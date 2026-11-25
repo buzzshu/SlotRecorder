@@ -123,6 +123,78 @@ def _feat_cell(g):
     if not g['feat_n']: return '0 次'
     return f"每 {g['feat_every']} 局 / 平均 {g['feat_avg_x']} 倍"
 
+# ---- win-size distribution line charts (inline SVG, print-safe) ----
+_WIN_BUCKETS = [(lo, hi, lab) for lo, hi, lab in BUCKETS if hi != 0]     # drop '= 0 沒中': both charts show win-size shape only
+_WIN_HIS = [('100+' if hi >= 1e17 else str(int(hi))) for _, hi, _ in _WIN_BUCKETS]
+C_OVERALL, C_FEATURE = '#2a78d6', '#eb6834'                              # dataviz slots 1 (blue) / 2 (orange), validated on white
+
+def _bucket_counts(mults):
+    """count of mults in each win bucket (lut half-open (lo, hi], upper inclusive)"""
+    cs = []
+    for lo, hi, _ in _WIN_BUCKETS:
+        hi_ = float('inf') if hi >= 1e17 else hi
+        cs.append(sum(1 for x in mults if lo < x <= hi_))
+    return cs
+
+def _nice_ceil(v):
+    if v <= 0: return 1.0
+    ex = math.floor(math.log10(v)); f = v / 10 ** ex
+    nf = 1 if f <= 1 else 2 if f <= 2 else 5 if f <= 5 else 10
+    return nf * 10 ** ex
+
+def _svg_dist(counts, denom, color, title, sub):
+    """one single-series win-size distribution: x = win-multiple bucket, y = probability (count/denom)."""
+    e = html.escape; n = len(counts)
+    probs = [c / denom if denom else 0 for c in counts]
+    W, H = 384, 158; ml, mr, mt, mb = 38, 10, 26, 34
+    iw, ih = W - ml - mr, H - mt - mb
+    ymax = _nice_ceil(max(probs) if probs else 0)
+    X = lambda i: ml + (iw * i / (n - 1) if n > 1 else iw / 2)
+    Y = lambda p: mt + ih * (1 - p / ymax)
+    pts = [(X(i), Y(p)) for i, p in enumerate(probs)]
+    grid = ''
+    for gy in (0.0, 0.5, 1.0):
+        yy = mt + ih * (1 - gy)
+        grid += f'<line x1="{ml}" y1="{yy:.1f}" x2="{ml + iw}" y2="{yy:.1f}" stroke="#e1e0d9" stroke-width="1"/>'
+        grid += f'<text x="{ml - 4}" y="{yy + 3:.1f}" font-size="8" text-anchor="end" fill="#898781">{ymax * gy:.1%}</text>'
+    area = f'M{pts[0][0]:.1f},{mt + ih:.1f} ' + ' '.join(f'L{px:.1f},{py:.1f}' for px, py in pts) + f' L{pts[-1][0]:.1f},{mt + ih:.1f} Z'
+    line = 'M' + ' L'.join(f'{px:.1f},{py:.1f}' for px, py in pts)
+    pk = max(range(n), key=lambda i: probs[i]) if n else 0
+    dots = ''
+    for i, (px, py) in enumerate(pts):
+        r = 3 if (i == pk and probs[pk] > 0) else 1.6
+        dots += (f'<circle cx="{px:.1f}" cy="{py:.1f}" r="{r}" fill="{color}">'
+                 f'<title>{e(_WIN_BUCKETS[i][2])}：{probs[i]:.2%}（{counts[i]} 次）</title></circle>')
+    anc = 'start' if pk == 0 else 'end' if pk == n - 1 else 'middle'   # keep the edge peak's label inside the plot
+    pklab = (f'<text x="{pts[pk][0]:.1f}" y="{pts[pk][1] - 6:.1f}" font-size="8.5" text-anchor="{anc}" fill="{color}" '
+             f'font-weight="bold">{probs[pk]:.1%}</text>') if (n and probs[pk] > 0) else ''
+    xlabs = ''.join(f'<text x="{X(i):.1f}" y="{mt + ih + 11:.1f}" font-size="7" text-anchor="middle" fill="#898781">{e(h)}</text>'
+                    for i, h in enumerate(_WIN_HIS))
+    return (f'<svg viewBox="0 0 {W} {H}" width="{W}" height="{H}" font-family="\'Microsoft JhengHei\',sans-serif">'
+            f'<text x="{ml}" y="12" font-size="11" font-weight="bold" fill="#0b0b0b">{e(title)}</text>'
+            f'<text x="{W - mr}" y="12" font-size="8.5" text-anchor="end" fill="#52514e">{e(sub)}</text>'
+            f'{grid}<path d="{area}" fill="{color}" fill-opacity="0.12"/>'
+            f'<path d="{line}" fill="none" stroke="{color}" stroke-width="2" stroke-linejoin="round"/>'
+            f'{dots}{pklab}{xlabs}'
+            f'<text x="{ml + iw / 2:.1f}" y="{H - 2}" font-size="7.5" text-anchor="middle" fill="#898781">贏分倍數（區間上限）</text></svg>')
+
+def _dist_card(g):
+    """one game: overall (每局) + feature (每次特色) win-size line charts side by side. '' when there is nothing to plot."""
+    if not g['n']: return ''
+    mults = [w / b for _, _, b, w, _ in g['spins'] if b]
+    miss = 1 - g['hit_rate'] if g.get('hit_rate') is not None else None
+    sub_o = (f'沒中 {miss:.0%}｜中獎 {g["hit_rate"]:.0%}' if miss is not None else f'{g["n"]:,} 局')
+    overall = _svg_dist(_bucket_counts(mults), g['n'], C_OVERALL, '每局贏分分布', sub_o)
+    if g.get('feat_n') is None:
+        feat = '<div class="distnote">舊版分析，無特色資料<br>（按 📊 重新分析）</div>'
+    elif not g['feat_n']:
+        feat = '<div class="distnote">尚未偵測到特色</div>'
+    else:
+        sub_f = f'{g["feat_n"]} 次特色｜平均 {g["feat_avg_x"]}x'
+        feat = _svg_dist(_bucket_counts(g['feat_x']), g['feat_n'], C_FEATURE, '每次特色贏分分布', sub_f)
+    return (f'<div class="distcard"><div class="distname">{html.escape(g["name"])}</div>'
+            f'<div class="distcharts">{overall}{feat}</div></div>')
+
 def render(all_games, target):
     e = html.escape; pct = lambda x: '—' if x is None else f'{x:.1%}'
     secs = []
@@ -139,16 +211,24 @@ def render(all_games, target):
                         f"<td>{_feat_cell(g)}</td><td>{e(g['last'])}</td><td>{need}</td><td><a href='{e(link)}'>最新報告</a></td></tr>")
         tot_h = sum(g['play_hours'] for g in games.values()); tot_n = sum(g['n'] for g in games.values())
         done = sum(1 for g in games.values() if not g['need'])
+        cards = ''.join(_dist_card(g) for g in sorted(games.values(), key=lambda g: -g['n']) if g['n'])
+        dist = (f"<h3 class='disth'>得分區間分布（每局 vs 每次特色）</h3>{cards}" if cards else '')
         secs.append(f"""<h2>{e(app_name)}</h2>
 <p>已錄 {len(games)} 款 / 清單共 {n_slots} 款；達到 {target:,} 局的 {done} 款；遊戲中合計 {tot_h:.1f} 小時、{tot_n:,} 局。
 Excel：<a href='{e(app_id)}/{e(app_id)}_統計.xlsx'>{e(app_id)}_統計.xlsx</a></p>
 <table><tr><th>遊戲</th><th>影片</th><th>影片時數</th><th>遊戲中時數</th><th>局數</th><th>RTP</th><th>95% 範圍</th><th>中獎率</th><th>特色遊戲</th><th>最近錄影</th><th>樣本</th><th>報告</th></tr>
-{''.join(rows) or '<tr><td colspan=12>還沒有分析過的影片</td></tr>'}</table>""")
+{''.join(rows) or '<tr><td colspan=12>還沒有分析過的影片</td></tr>'}</table>
+{dist}""")
     return f"""<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><title>錄影總覽</title>
 <style>@page{{size:A4 landscape;margin:10mm}}body{{font-family:"Microsoft JhengHei",sans-serif;margin:24px;color:#222;font-size:13px}}
 table{{border-collapse:collapse;margin:8px 0 24px;page-break-inside:avoid}}td,th{{border:1px solid #ccc;padding:4px 8px;text-align:right;white-space:nowrap}}
 th{{background:#f3f3f3}}td:first-child,th:first-child{{text-align:left}}.b{{font-weight:bold}}tr.low td:nth-child(11){{color:#b45309}}
-tr.ok td:nth-child(11){{color:#15803d}}</style>
+tr.ok td:nth-child(11){{color:#15803d}}
+h3.disth{{font-size:14px;margin:18px 0 6px}}
+.distcard{{border:1px solid #e1e0d9;border-radius:6px;padding:6px 10px 2px;margin:8px 0;background:#fcfcfb;page-break-inside:avoid}}
+.distname{{font-weight:bold;font-size:13px;margin-bottom:2px}}
+.distcharts{{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}}
+.distnote{{color:#898781;font-size:11px;align-self:center;padding:46px 24px;text-align:center}}</style>
 <h1>錄影總覽</h1><p>更新時間 {time.strftime('%Y-%m-%d %H:%M')}｜每款目標 {target:,} 局（局數少於目標時 RTP 範圍很寬，僅供參考）。
 樣本不足的排在前面；在 SlotRecorder 按「勾選樣本不足」可以一鍵勾選並設好補錄分鐘數。</p>
 {''.join(secs)}
