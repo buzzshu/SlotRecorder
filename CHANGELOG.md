@@ -3,6 +3,13 @@
 版號規則：`主版.次版.修正`。新功能 → 次版 +1；只修 bug → 修正 +1。
 版號寫在 `core/version.py`，GUI 標題列、log、打包檔名都會顯示。
 
+## 1.23.0 — 2026-11-26
+- **新增 app:CA$H Rally**(`apps/cash_rally/`,package `slots.acg.casino.games.free.android`,Cocos2d-x Lua,直式 720×1280 IGT 賭場)—— profile.json + 3 個 tpl 範本 + **128 款 slots.csv 與縮圖**。meter OCR(餘額/押注)離線實測正確。
+- **`core/catalog.py` 新增 `grid` tile 偵測模式** —— 給「無邊框圓角大圖、無明顯邊緣」的 3 欄方格大廳用(88F/LL 的 edge 模式偵測不到)。對固定欄位做亮度剖面、以 comb-fit 擬合列邊界(固定 pitch + 相位,最大化 cell 中心亮度 − 邊界亮度),只輸出完整可見的列、固定高度切格。**既有 app 走原 edge/anchor 路徑完全不變**(`cfg.get('grid')` 才進新路徑)。
+- **`catalog.add_new` 新增 `min_hits` 過濾** —— 捲動時跨兩 tile 的 straddle crop 與 banner 三分切片只會出現 1 次(hits==1、會水平漂移),真遊戲對齊會在 ≥2 幀出現;預設 `min_hits=1`(不影響既有 app),CA$H Rally 設 2 濾掉垃圾碎片。
+- **錄製狀態**:CA$H Rally 完整 `core.batch` 錄製**延後** —— 大廳所有遊戲等級鎖、地板 **Lv.150**(帳號 Lv.2、Lv.10 解不了任何關),XP 僅來自 spin 故無可玩的關可練,非程式可解。catalog 與 OCR 已驗,待帳號到可玩等級再補錄。
+- **驗證**:獨立 Verify agent 複查 —— 88F/LL/bao_ni_fa 的 edge/anchor 路徑逐位元不變、`min_hits` 預設 1、region 排序正確、範本齊全;csv **128 筆 = 128 縮圖、0 缺檔**。
+
 ## 1.22.0 — 2026-11-26
 - **影片目錄改成三層:`app / 遊戲 / 產物分類`** —— 以前每個 app 底下把所有遊戲的所有產物平鋪在一層(幾十個檔混在一起)。現在每款遊戲(= 錄製時的 `slot_id`)一個資料夾,裡面再分 4 個 bucket:
   - `raw/` = mp4、`_scrcpy.log`、segment、concat/clean;`meta/` = `_meter.json` / `_stats.json` / `_handoff.json` / `_timeline.csv`;`report/` = `_summary.json` / `.html` / `.pdf` / `_spins.tsv`;`frames/` = `_snaps/` 與 `_features/`。`.analyzing` 鎖檔留在遊戲資料夾根(gate 整支)。

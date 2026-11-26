@@ -1,0 +1,43 @@
+{
+  "name": "CA$H Rally",
+  "package": "slots.acg.casino.games.free.android",
+  "activity": "org.cocos2dx.lua.AppActivity",
+  "launch_wait": 50,
+  "screen": [1280, 720],
+  "lobby_marker": "lobby_regular_room",
+  "ingame_marker": "ingame_maxbet",
+  "spin_btn": "spin_btn",
+  "spin_xy": [595, 1190],
+  "bet_minus_xy": [210, 1210],
+  "bet_plus_xy": [418, 1210],
+  "bet_minus_taps": 10,
+  "play_btn": null,
+  "low_coins": null,
+  "exit_slot_xy": [75, 33],
+  "x_templates": [],
+  "dismiss_templates": [],
+  "ocr_safe_extra": ["COLLECT", "LATER", "NO THANKS"],
+  "meters": {
+    "balance": [100, 80, 315, 112],
+    "bet": [250, 1190, 390, 1232]
+  },
+  "lobby_scan": {
+    "rewind_swipe": [360, 450, 360, 1050, 150],
+    "rewind_times": 14,
+    "rewind_by_shift": true,
+    "step_swipe": [360, 900, 360, 600, 1100],
+    "max_steps": 80,
+    "region": [60, 205, 660, 1150],
+    "threshold": 0.6
+  },
+  "catalog": {
+    "region": [60, 665, 205, 1152],
+    "grid": {
+      "cols": [[78, 273], [285, 478], [490, 648]],
+      "pitch": [188, 210]
+    },
+    "min_hits": 2
+  },
+  "reset": "pm_clear",
+  "notes": "Portrait 720x1280 (Cocos2d-x Lua, IGT casino). Lobby = Regular Room (High Limit Room locked by level). Games are a 3-wide grid of ~195px square tiles with occasional full-width featured banners; each tile has a level-unlock badge bottom-left (5/30/60/70...). Lobby scrolls VERTICALLY. Right-side 'Feature Center' flyout overlaps the right column -> collapse it (tap its > arrow) before cataloging. New account forces: welcome gift -> tutorial first-game -> must level to Lv.2 (spin in the featured slot) to free the lobby -> level-up chest/wheel/milestone -> MISSIONS UNLOCKED -> LOGIN BONUS -> several $ paid offers (EARLY ACCESS, PICK ONE PUMPKIN PIE, THANKSGIVING) -> close all via their X, never tap a $ price button. Google Play Games 'create profile' dialog on launch -> 取消/Cancel. Home icon top-left (75,33) exits a slot to the lobby. RECORDING STATUS (2026-11-26): catalog scanned (128 games + thumbnails + grid detection) and meter OCR validated offline (balance/bet read correctly); full in-game recording via core.batch is DEFERRED. Every lobby game is level-locked with a FLOOR of Lv.150 (Polar Ice tooltip 'Unlock at LV.150', lobby sorted ascending so 150 is the lowest), account is Lv.2. XP in this genre comes only from spinning, so with no playable game there is no XP source; the Missions panel (only non-spin XP candidate) fails to render and hangs the app. Leveling Lv.2->150 is a multi-day manual grind (daily bonuses, likely paid Starter Pack), NOT automatable via adb; Lv.10 unlocks nothing. Record once the account reaches a playable level. DeepLinkActivity exists (scheme com.cashrally.slots://, plus Adjust haqy.adj.st http/https) but the game-open URI grammar is internal (Lua) and the level lock is server-enforced, so a deeplink does not bypass the gate."
+}

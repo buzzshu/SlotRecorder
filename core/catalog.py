@@ -94,7 +94,48 @@ def _anchor_tiles(im, cfg):
         if x >= x0 and y >= y0 - 10 and x + w <= x1: out.append((x, max(0, y), w, h))
     return out
 
+def _grid_tiles(im, cfg):
+    """fixed-grid lobbies (CA$H Rally): the tiles are rounded art thumbnails with NO hard frame, so edge pairing
+    fails -- but they sit in a strict grid of fixed columns and one vertical pitch. We know the columns; the only
+    unknown per screenshot is the row phase (the lobby scrolls continuously). Fit a comb of row-boundaries to the
+    dark gaps between rows (one global (pitch, phase) over ALL rows -> robust to a few noisy rows), then emit each
+    column cell. A full-width featured banner (its art crosses the inter-column gutters) is emitted as one wide tile.
+    profile catalog.grid = {'cols': [[x0,x1], ...], 'pitch': [min, max]}; region is catalog.region [x0,x1,y0,y1]."""
+    gcfg = cfg['grid']; cols = [tuple(c) for c in gcfg['cols']]
+    X0, X1, Y0, Y1 = cfg['region']; pmin, pmax = gcfg.get('pitch', [188, 210])
+    g = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    cm = np.zeros(g.shape[1], bool)
+    for a, b in cols: cm[a:b] = True
+    prof = cv2.GaussianBlur(g[:, cm].mean(axis=1).reshape(-1, 1), (1, 7), 0).ravel()
+    best = None
+    for P in range(pmin, pmax + 1, 2):
+        for phi in range(Y0, Y0 + P, 3):
+            ys = list(range(phi, Y1, P))
+            if len(ys) < 2: continue
+            bnd = float(np.mean([prof[max(0, y - 4):y + 5].mean() for y in ys]))          # boundaries should sit in dark gaps
+            cen = float(np.mean([prof[y + P // 2 - 25:y + P // 2 + 25].mean() for y in ys[:-1]]))  # cell middles are bright art
+            if best is None or cen - bnd > best[0]: best = (cen - bnd, P, phi)
+    if best is None: return []                       # region shorter than the smallest pitch -> nothing to place
+    _, P, phi = best
+    bnds = []; y = phi
+    while y > Y0 - P: bnds.insert(0, y); y -= P                       # extend up so the top (clipped) row is kept too
+    y = phi + P
+    while y < Y1 + P: bnds.append(y); y += P
+    gut = [(cols[i][1], cols[i + 1][0]) for i in range(len(cols) - 1)]  # inter-column gutters
+    ch = gcfg.get('cell_h', 168)                   # FIXED cell height: same game -> identical-size crop across frames
+    out = []                                       # (variable-height crops resize differently and defeat the dedup -> phantoms)
+    for ya, yb in zip(bnds[:-1], bnds[1:]):
+        cy = (ya + yb) // 2; ca, cb = cy - ch // 2, cy + ch // 2
+        if ca < Y0 or cb > Y1: continue            # only rows whose fixed box is fully on-screen (no clipped phantoms)
+        incol = g[ca:cb, cols[0][0]:cols[0][1]].mean()
+        wide = gcfg.get('wide_banner') and gut and all(g[ca:cb, a:b].mean() > max(110.0, incol * 0.85) for a, b in gut)  # art crosses gutters -> banner
+        if wide: out.append((cols[0][0], ca, cols[-1][1] - cols[0][0], cb - ca))
+        else:
+            for xa, xb in cols: out.append((xa, ca, xb - xa, cb - ca))
+    return out
+
 def find_tiles(im, cfg):
+    if cfg.get('grid'): return _grid_tiles(im, cfg)
     if cfg.get('_anchor_imgs'): return _anchor_tiles(im, cfg)
     g = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY).astype(np.float32)
     gx = np.abs(cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)); gy = np.abs(cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3))
@@ -239,10 +280,12 @@ def add_new(app, say=log):
     """after scan(): tiles that match none of the slots already listed -> added unticked, named from OCR (or New_Game_<n>)"""
     out = os.path.join(app.dir, 'catalog'); meta = json.load(open(os.path.join(out, 'catalog.json'), encoding='utf-8'))
     ids = [r['id'] for r in app.slots()]; names = {}; x0, x1 = app.p['catalog']['region'][:2]; stamp = time.strftime('%m%d')
+    min_hits = app.p['catalog'].get('min_hits', 1)   # a tile the scan saw only once is usually a straddle/banner sliver, not a game
     from .vision import Templates
     ign_dir = os.path.join(app.dir, 'ignore'); ign = Templates(ign_dir)     # tiles a person deleted / marked as not-a-game
     ign_names = [f[:-4] for f in os.listdir(ign_dir) if f.endswith('.png')] if os.path.isdir(ign_dir) else []
     for m in meta:
+        if m.get('hits', 1) < min_hits: continue
         fr = imread(os.path.join(out, 'frames', m['frame'] + '.png')); x, y, w, h = m['rect']
         if fr is None or x <= x0 + 10 or x + w >= x1 - 10: continue        # clipped by the scan area -> not a whole tile
         roi = fr[max(0, y - 30):y + h + 30, max(0, x - 30):x + w + 30]
