@@ -10,7 +10,7 @@ usage:  python -m core.exports <video.mp4> [...] [--dest <folder>]   (--dest: ov
 Runs automatically in the background after a matching recording.
 """
 import argparse, json, os, re, subprocess, sys
-from .config import CFG, ROOT, TOOLS
+from .config import CFG, ROOT, TOOLS, find, base_of
 
 _NOWIN = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 DEFAULT = [
@@ -30,7 +30,7 @@ def wanted(app_id, slot_id):
     return any(t['app'] == app_id and slot_id in t['slots'] and os.path.isdir(_dest(t)) for t in targets())
 
 def _stats(mp4):
-    p = mp4[:-4] + '_stats.json'
+    p = find(base_of(mp4), '_stats.json')
     if not os.path.exists(p): return {}
     with open(p, encoding='utf-8') as f: return json.load(f)
 

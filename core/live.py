@@ -8,7 +8,7 @@ The final numbers still come from core.analyze on the video (4 readings / s, cat
 """
 import glob, json, os, time
 import numpy as np
-from .config import CFG, ROOT, video_dir
+from .config import CFG, ROOT, video_dir, find, base_of
 from .analyze import stable_values, clean_jumps, build_spins, boot_rtp, find_features, load_spins
 
 LIVE_DIR = os.path.join(ROOT, 'logs', 'live')
@@ -63,17 +63,17 @@ class Live:
         from .overview import _slots, _norm
         by_name = {_norm(r['name']): r['id'] for r in _slots(self.app_id)}
         out = []; vdir = video_dir(self.app_id)
-        for js in glob.glob(os.path.join(vdir, '*_summary.json')):
+        for js in glob.glob(os.path.join(vdir, '**', '*_summary.json'), recursive=True):
             if js.endswith('_merged_summary.json'): continue
-            base = js[:-len('_summary.json')]; st = {}
-            if os.path.exists(base + '_stats.json'):
+            base = base_of(js); st = {}
+            if os.path.exists(find(base, '_stats.json')):
                 try:
-                    with open(base + '_stats.json', encoding='utf-8') as f: st = json.load(f)
+                    with open(find(base, '_stats.json'), encoding='utf-8') as f: st = json.load(f)
                 except (OSError, ValueError): pass
             fname = re.sub(r'^\d{8}_\d{6}_|(_PARTIAL|_e\d+)+$', '', os.path.basename(base))
             if (st.get('slot') or by_name.get(_norm(fname)) or fname) != self.slot: continue
             if self.group and st.get('group') == self.group: continue
-            if os.path.exists(base + '_spins.tsv'): out += [w / b for _, b, w in load_spins(base) if b]
+            if os.path.exists(find(base, '_spins.tsv')): out += [w / b for _, b, w in load_spins(base) if b]
         return out
 
     def add(self, t, v): self.series.append((t, v))

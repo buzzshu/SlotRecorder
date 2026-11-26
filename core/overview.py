@@ -9,7 +9,7 @@ without one are matched by the name in the file name.
 """
 import argparse, glob, html, json, math, os, re, shutil, subprocess, sys, tempfile, time
 import numpy as np
-from .config import CFG, ROOT, video_dir
+from .config import CFG, ROOT, video_dir, find, base_of
 from .analyze import spin_stats, load_spins, hms, fmt, BUCKETS, trust_overall, trust_feature
 
 _NOWIN = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -32,17 +32,17 @@ def collect(app_id):
     vdir = video_dir(app_id); rows = _slots(app_id)
     by_name = {_norm(r['name']): r['id'] for r in rows}; names = {r['id']: r['name'] for r in rows}
     games = {}
-    for js in sorted(glob.glob(os.path.join(vdir, '*_summary.json'))):
+    for js in sorted(glob.glob(os.path.join(vdir, '**', '*_summary.json'), recursive=True)):
         if js.endswith('_merged_summary.json'): continue
-        base = js[:-len('_summary.json')]
-        if not os.path.exists(base + '_spins.tsv'): continue
+        base = base_of(js)
+        if not os.path.exists(find(base, '_spins.tsv')): continue
         try:
             with open(js, encoding='utf-8') as f: s = json.load(f)
         except (OSError, ValueError): continue
         st = {}
-        if os.path.exists(base + '_stats.json'):
+        if os.path.exists(find(base, '_stats.json')):
             try:
-                with open(base + '_stats.json', encoding='utf-8') as f: st = json.load(f)
+                with open(find(base, '_stats.json'), encoding='utf-8') as f: st = json.load(f)
             except (OSError, ValueError): pass
         fname = re.sub(r'^\d{8}_\d{6}_|(_PARTIAL|_e\d+)+$', '', os.path.basename(base))
         key = st.get('slot') or by_name.get(_norm(fname)) or fname
@@ -58,7 +58,7 @@ def collect(app_id):
             g['feat_spins'] = g.get('feat_spins', 0) + s.get('spins', 0)
         g['videos'].append({'video': os.path.basename(base) + '.mp4', 'when': when, 'play_hours': s.get('play_hours', 0),
                             'video_s': st.get('video_s') or _secs(s.get('video_length')), 'spins': len(sp), 'rtp': s.get('rtp'), 'bet': s.get('bet'),
-                            'read': s.get('meter_read_rate'), 'emulator': st.get('emulator'), 'html': base + '_summary.html', 'trust': to, 'trust_feat': tf})
+                            'read': s.get('meter_read_rate'), 'emulator': st.get('emulator'), 'html': find(base, '_summary.html'), 'trust': to, 'trust_feat': tf})
         if to: g['spins'] += [(os.path.basename(base) + '.mp4', t, b, w, isf) for t, b, w, isf in sp]   # overall pool
     for g in games.values():
         n = len(g['spins'])

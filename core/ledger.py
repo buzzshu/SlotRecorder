@@ -25,10 +25,11 @@ CLI
 import json, os, re, sys, time, statistics as st
 
 try:
-    from .config import ROOT, CFG
+    from .config import ROOT, CFG, find, base_of
 except ImportError:                                            # run as a plain script
     ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     CFG = {}
+    from config import find, base_of
 
 STATS = os.path.join(ROOT, 'stats')
 VID_COLS = ['video_id', 'date', 'app', 'slot', 'bet', 'spins', 'total_bet', 'play_hours',
@@ -50,14 +51,8 @@ def _date_of(video_id):
 
 
 def _base_of(path):
-    """<base> from a summary.json / mp4 / base path"""
-    p = str(path)
-    for suf in ('_summary.json', '_handoff.json', '_spins.tsv'):
-        if p.endswith(suf):
-            return p[:-len(suf)]
-    if p.lower().endswith('.mp4'):
-        return p[:-4]
-    return p
+    """<base> from a summary.json / mp4 / base path (pops the product bucket subfolder too)."""
+    return base_of(str(path))
 
 
 class _Lock:
@@ -103,7 +98,7 @@ def _append_tsv(path, cols, rows):
 def add(path, say=print, force=False):
     """add one analysed video's features to its game ledger. Idempotent by video id. -> number of features added, or None."""
     base = _base_of(path)
-    sj = base + '_summary.json'
+    sj = find(base, '_summary.json')
     if not os.path.exists(sj):
         return None
     with open(sj, encoding='utf-8') as f:

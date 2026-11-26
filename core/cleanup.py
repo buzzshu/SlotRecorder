@@ -3,20 +3,20 @@ Everything small stays (report / stats / timeline / spins / snaps / feature clip
 A recording is safe to purge when its <base>_summary.json exists and is newer than the .mp4 (= analysis finished
 on this video) and no analysis is running on it right now. Manual button first; auto purge can call purgeable()/purge() later.
 """
-import os, time
+import glob, os, time
+from .config import prod, find, base_of
 
 def purgeable(vdir, days):
     """-> [(mp4_path, size_bytes, age_days)] for analysed recordings older than `days`, newest-first by nothing (caller sorts)."""
     out = []
     cutoff = time.time() - days * 86400
-    try: names = os.listdir(vdir)
-    except OSError: return out
-    for f in names:
-        if not f.endswith('.mp4') or f.endswith('_clean.mp4'): continue
-        p = os.path.join(vdir, f); base = p[:-4]
+    mp4s = glob.glob(os.path.join(vdir, '*.mp4')) + glob.glob(os.path.join(vdir, '*', 'raw', '*.mp4'))   # legacy flat + new per-game raw/
+    for p in mp4s:
+        if p.endswith('_clean.mp4'): continue
+        base = base_of(p)
         try:
-            if os.path.exists(base + '.analyzing'): continue           # analysis running right now -> keep
-            sj = base + '_summary.json'
+            if os.path.exists(find(base, '.analyzing')): continue   # analysis running right now -> keep
+            sj = find(base, '_summary.json')
             if not os.path.exists(sj): continue                        # never analysed -> keep
             if os.path.getmtime(sj) < os.path.getmtime(p): continue    # summary older than the video -> stale analysis, keep
             if os.path.getmtime(p) > cutoff: continue                  # too new

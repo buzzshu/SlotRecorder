@@ -1,12 +1,12 @@
 """SlotRecorder GUI — pick an app + emulator, tick slots, press 開始錄製. Several emulators can record at the same time.
 Also: add a slot (crop its lobby tile), add popup close-button / button templates, schedule, analyse videos, pack the tool."""
-import json, math, os, queue, re, shutil, subprocess, sys, threading, time
+import glob, json, math, os, queue, re, shutil, subprocess, sys, threading, time
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT); sys.path.insert(0, ROOT)
-from core.config import CFG, TOOLS, video_dir, save as save_cfg, load as load_cfg
+from core.config import CFG, TOOLS, video_dir, find, base_of, save as save_cfg, load as load_cfg
 from core.app import App, list_apps, X_LIB
 from core.vision import imwrite, imread
 from core import device as d
@@ -916,7 +916,7 @@ class Gui(tk.Tk):
             p.wait()
             if merged: self.q.put(('merged', merged)); return          # several videos of one slot -> show the merged report
             for f in fs:
-                h = f[:-4] + '_summary.html'
+                h = find(base_of(f), '_summary.html')
                 if os.path.exists(h) and os.path.getmtime(h) > time.time() - 3600: os.startfile(h)
         self._bg(work)
     def _reanalyze_all(self):
@@ -925,18 +925,18 @@ class Gui(tk.Tk):
         a = self.app()
         if not a: messagebox.showinfo('重新辨識全部', '先選一個 App', parent=self); return
         vd = video_dir(a.id)
-        try: vids = [f for f in os.listdir(vd) if f.endswith('.mp4') and not f.endswith('_clean.mp4')]
-        except OSError: vids = []
+        vids = [v for v in glob.glob(os.path.join(vd, '*.mp4')) + glob.glob(os.path.join(vd, '*', 'raw', '*.mp4'))   # legacy flat + new per-game raw/
+                if not v.endswith('_clean.mp4')]
         if not vids: messagebox.showinfo('重新辨識全部', '這個 App 還沒有影片', parent=self); return
         cur = sec = 0                                                  # sec counts only the videos that will actually re-run
-        for f in vids:
-            base = os.path.join(vd, f[:-4])
+        for v in vids:
+            base = base_of(v)
             try:
-                with open(base + '_summary.json', encoding='utf-8') as fh:
+                with open(find(base, '_summary.json'), encoding='utf-8') as fh:
                     if json.load(fh).get('analyzer_version') == VERSION: cur += 1; continue
             except (OSError, ValueError): pass
             try:
-                with open(base + '_stats.json', encoding='utf-8') as fh: sec += json.load(fh).get('video_s') or 0
+                with open(find(base, '_stats.json'), encoding='utf-8') as fh: sec += json.load(fh).get('video_s') or 0
             except (OSError, ValueError): pass
         todo = len(vids) - cur; est = max(1, math.ceil(sec / 3600 * 2))
         r = messagebox.askyesnocancel('重新辨識全部',

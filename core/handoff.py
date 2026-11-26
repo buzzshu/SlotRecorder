@@ -29,6 +29,7 @@ LIMITS (state them, don't paper over):
     video file (see "video"); feed the recognizer the same file, not a different cut.
 """
 import json, os, re
+from .config import find, outp, base_of
 
 SCHEMA = 'slotrec-handoff/1'
 
@@ -46,7 +47,7 @@ def _hms_to_s(t):
 def _spin_rows(base):
     """[(i, t_sec, bet, win, balance_after, time_hms)] from <base>_spins.tsv"""
     rows = []
-    with open(base + '_spins.tsv', encoding='utf-8') as f:
+    with open(find(base, '_spins.tsv'), encoding='utf-8') as f:
         next(f, None)
         for line in f:
             p = line.rstrip('\n').split('\t')
@@ -65,8 +66,8 @@ def _num(s):
 
 def build(mp4, say=print):
     """write <video>_handoff.json from the sidecars analyze already produced. -> path, or None if not analysable yet."""
-    base = mp4[:-4] if mp4.lower().endswith('.mp4') else mp4
-    sj, tsv = base + '_summary.json', base + '_spins.tsv'
+    base = base_of(mp4) if mp4.lower().endswith('.mp4') else mp4
+    sj, tsv = find(base, '_summary.json'), find(base, '_spins.tsv')
     if not (os.path.exists(sj) and os.path.exists(tsv)):
         return None
     with open(sj, encoding='utf-8') as f:
@@ -74,8 +75,8 @@ def build(mp4, say=print):
     if s.get('merged'):
         return None                                         # a merged report has no single video timeline
     stats = {}
-    if os.path.exists(base + '_stats.json'):
-        with open(base + '_stats.json', encoding='utf-8') as f:
+    if os.path.exists(find(base, '_stats.json')):
+        with open(find(base, '_stats.json'), encoding='utf-8') as f:
             stats = json.load(f)
     rows = _spin_rows(base)
     if not rows:
@@ -140,7 +141,7 @@ def build(mp4, say=print):
         'clean_file': stats.get('clean_file'), 'clean_cut_s': stats.get('clean_cut_s'),
         'spins': spins, 'features': feats_out, 'off_game': off,
     }
-    out = base + '_handoff.json'
+    out = outp(base, '_handoff.json')
     with open(out, 'w', encoding='utf-8') as f:
         json.dump(ho, f, indent=1, ensure_ascii=False)
     nfeat = sum(1 for sp in spins if sp['feature'])
@@ -168,7 +169,7 @@ if __name__ == '__main__':
         for dp, _dn, fns in os.walk(root):
             for fn in fns:
                 if fn.endswith('_summary.json') and '_merged' not in fn:
-                    mp4 = os.path.join(dp, fn[:-len('_summary.json')] + '.mp4')
+                    mp4 = find(base_of(os.path.join(dp, fn)), '.mp4')
                     try:
                         if build(mp4) is None:
                             print('skip (no spins/tsv):', os.path.basename(mp4))

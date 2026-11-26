@@ -3,6 +3,17 @@
 版號規則：`主版.次版.修正`。新功能 → 次版 +1；只修 bug → 修正 +1。
 版號寫在 `core/version.py`，GUI 標題列、log、打包檔名都會顯示。
 
+## 1.22.0 — 2026-11-26
+- **影片目錄改成三層:`app / 遊戲 / 產物分類`** —— 以前每個 app 底下把所有遊戲的所有產物平鋪在一層(幾十個檔混在一起)。現在每款遊戲(= 錄製時的 `slot_id`)一個資料夾,裡面再分 4 個 bucket:
+  - `raw/` = mp4、`_scrcpy.log`、segment、concat/clean;`meta/` = `_meter.json` / `_stats.json` / `_handoff.json` / `_timeline.csv`;`report/` = `_summary.json` / `.html` / `.pdf` / `_spins.tsv`;`frames/` = `_snaps/` 與 `_features/`。`.analyzing` 鎖檔留在遊戲資料夾根(gate 整支)。
+  - 新錄製(`core/record.py`)自動歸位;`videos/overview.json`、`總覽.*`、`<app>/<app>_統計.xlsx`、`<app>/paytables/` 維持原位。
+- **中央路徑解析(`core/config.py`)** —— 單一真相來源,全專案讀寫都走它,版面規則只在這裡:
+  - `prod(base, suf)` 寫新版面(入 bucket、建目錄);`base_of(path)` 反解(吃新舊兩種路徑);`find(base, suf)` 讀(新版優先 → 退回舊扁平 → 皆無回新版面,不建目錄);`outp(base, suf)` 寫(就地覆蓋既有位置,否則新版面,建目錄 → **絕不留新舊重複檔**)。
+  - **向後相容**:新 code 對「還沒搬的扁平資料」照樣讀得到;實測重建 overview 與搬移前 **0 差異**。
+- **新增 `python -m core.relayout`** —— 把現有錄影從舊扁平版面搬進新三層版面。預設 dry-run 列清單,`--apply` 才動檔;**冪等**(只掃各 app 直屬的產物、已搬的跳過,重跑 = 0 move),遇目標已存在只跳過警告、不覆蓋。遊戲鍵與 overview 分組完全一致(stats slot id → slots.csv 名稱對應 → 檔名;merged 報告映回所屬遊戲);**缺 `_stats.json` 的錄影也會被搬**(以任一產物為錨,比照 `overview.collect`)。
+  - 換電腦:`git pull` 後各自跑一次 `python -m core.relayout`(先看)→ `--apply`。`videos/` 不進 git,所以每台都要各跑一次。
+- **驗證**:本機搬 624 個檔案/資料夾、0 衝突;搬後重建 overview 的 RTP / 局數 / 時數與搬前 **0 差異**;`recompute` 在新版面就地改寫、無重複檔;獨立 Verify agent 複查 11 檔無 correctness bug。
+
 ## 1.21.0 — 2026-11-25
 - **修正「特色大獎被誤判成 gift(外部加值)扣掉 RTP」** —— 低讀取率影片 RTP 嚴重假性偏低的真因。`build_spins` 原本:某段餘額跳升若「偵測到 0 個 spin(`n==0`)且時間落在 gift_window(靠關彈窗 tap 定義,關鍵字含 `GREAT`/`WHEEL`)」就當成外部加值(gift)扣掉、不算贏分。但**特色/大獎動畫在低讀取時 spin 全讀不到(`n==0`),結束又 tap 關大獎畫面** → 整筆派彩正好命中這條規則被扣掉。
   - **鐵證**:一支 89 局影片餘額實際 `58,686,000,000 → 100,902,000,000`(淨賺 422 億),卻報 RTP 0.26;那兩筆被當 gift 的跳升是 **99 倍、178 倍 bet**(遊戲中段 @3:48 / @8:34),真 gift 實測最大才 12 倍。

@@ -10,10 +10,10 @@ output: <video>_spins.tsv   one row per spin (time in video, bet, win, multiple,
         <video>_summary.json / _summary.html   RTP (+95% range), hit rate, win-size distribution, coins per hour, top wins
         --merge / --group: <..>_merged_summary.html / .json / _spins.tsv = all spins of the same slot from several videos
 """
-import argparse, html, json, math, os, re, subprocess, sys, time
+import argparse, glob, html, json, math, os, re, subprocess, sys, time
 import cv2
 import numpy as np
-from .config import CFG, TOOLS, ROOT, video_dir
+from .config import CFG, TOOLS, ROOT, video_dir, prod, find, outp, base_of
 from .ocr import read_number
 from .version import VERSION
 
@@ -295,7 +295,7 @@ def feature_summary(feats, n_spins, tot_bet, gap=FEATURE_GAP_S):
 
 def cut_features(mp4, feats, say=print, max_clips=60):
     """<video>_features/NN_<time>_<x>x.mp4 (5 s before to 5 s after) + _start.jpg / _end.jpg, cut without re-encoding"""
-    out = mp4[:-4] + '_features'
+    out = outp(base_of(mp4), '_features')
     if os.path.isdir(out):
         for f in os.listdir(out): os.remove(os.path.join(out, f))
     if not feats or not CFG.get('feature_clips', True): return
@@ -312,15 +312,15 @@ def cut_features(mp4, feats, say=print, max_clips=60):
     say(f'feature clips: {min(len(feats), max_clips)} -> {os.path.basename(out)}')
 
 def _active_runs(vdir, exclude=None):
-    """live <video>.analyzing_run markers = analyses past the gate and actually working right now"""
+    """live <video>.analyzing_run markers = analyses past the gate and actually working right now.
+    Walks the app dir: per-game folders keep each recording's lock at its own game-root."""
     out = []
-    try: names = os.listdir(vdir)
-    except OSError: return out
-    for f in names:
-        if not f.endswith('.analyzing_run'): continue
-        p = os.path.join(vdir, f)
-        if exclude and os.path.abspath(p) == os.path.abspath(exclude): continue
-        if _lock_alive(p): out.append(p)
+    for dp, _dn, names in os.walk(vdir):
+        for f in names:
+            if not f.endswith('.analyzing_run'): continue
+            p = os.path.join(dp, f)
+            if exclude and os.path.abspath(p) == os.path.abspath(exclude): continue
+            if _lock_alive(p): out.append(p)
     return out
 
 def _wait_for_slot(vdir, cap, own_run, say):
@@ -333,12 +333,13 @@ def _wait_for_slot(vdir, cap, own_run, say):
 def analyze(mp4, app_id=None, fps=4, say=print, gate=0):
     """analyse one video. A <video>.analyzing flag file exists while it runs (a merge waits for it instead of redoing it).
     gate>0: wait until fewer than `gate` analyses are actively running before starting the heavy work (keeps a big batch from thrashing)."""
-    base = mp4[:-4]; lock = base + '.analyzing'; run = base + '.analyzing_run'
+    base = base_of(mp4); lock = prod(base, '.analyzing'); run = prod(base, '.analyzing_run')   # locks at the game-root
     try:
         with open(lock, 'w') as f: f.write(str(os.getpid()))
     except OSError: lock = None
     if gate and gate > 0:
-        _wait_for_slot(os.path.dirname(os.path.abspath(mp4)) or '.', gate, run, say)
+        app_dir = os.path.dirname(os.path.dirname(base)) or '.'   # videos/<app>: count active runs across all its games
+        _wait_for_slot(app_dir, gate, run, say)
         try:
             with open(run, 'w') as f: f.write(str(os.getpid()))
         except OSError: run = None
@@ -445,17 +446,17 @@ def write_spins_tsv(path, spins, bet, trig):
                     f"\t{'feature' if (i - 1) in trig else 'base'}\n")
 
 def _analyze(mp4, app_id=None, fps=4, say=print):
-    base = mp4[:-4]
+    base = base_of(mp4)
     stats = {}
-    if os.path.exists(base + '_stats.json'):
-        with open(base + '_stats.json', encoding='utf-8') as f: stats = json.load(f)
+    if os.path.exists(find(base, '_stats.json')):
+        with open(find(base, '_stats.json'), encoding='utf-8') as f: stats = json.load(f)
     app_id = app_id or stats.get('app') or os.path.basename(os.path.dirname(os.path.abspath(mp4)))
     prof = json.load(open(os.path.join(ROOT, 'apps', app_id, 'profile.json'), encoding='utf-8'))
     size = video_size(mp4)                                   # landscape slots are recorded as 1280x720 videos
     boxes = (prof.get('landscape') or {}).get('meters') if size[0] > size[1] else prof.get('meters')
     if not boxes or 'balance' not in boxes: raise SystemExit(f'{app_id}: profile has no meters.balance box for a {size[0]}x{size[1]} video')
     t_start = time.time(); say(f'reading balance meter: {os.path.basename(mp4)}')
-    cache = base + '_meter.json'
+    cache = find(base, '_meter.json')                                          # read an existing cache wherever it sits (flat or bucketed)
     c = None
     if os.path.exists(cache) and os.path.getmtime(cache) > os.path.getmtime(mp4):
         with open(cache) as f: c = json.load(f)
@@ -464,20 +465,20 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
         series, bet_reads = [tuple(x) for x in c['series']], [tuple(x) for x in c['bets']]
     else:
         series, bet_reads = read_series(mp4, boxes, fps, progress=lambda t: say(f'  {hms(t)} read'), size=size)
-        with open(cache, 'w') as f: json.dump({'fps': fps, 'boxes': boxes, 'series': series, 'bets': bet_reads}, f)
+        with open(outp(base, '_meter.json'), 'w') as f: json.dump({'fps': fps, 'boxes': boxes, 'series': series, 'bets': bet_reads}, f)
     R = _reconstruct(series, bet_reads, stats, fps, say)
     summary, trig = _summarize(base, prof, stats, series, R, mp4, app_id, t_start, say)
     spins, bet = R['spins'], R['bet']
-    write_spins_tsv(base + '_spins.tsv', spins, bet, trig)
-    with open(base + '_summary.json', 'w', encoding='utf-8') as f: json.dump(summary, f, indent=1, ensure_ascii=False)
-    with open(base + '_summary.html', 'w', encoding='utf-8') as f: f.write(render_html(summary))
+    write_spins_tsv(outp(base, '_spins.tsv'), spins, bet, trig)
+    with open(outp(base, '_summary.json'), 'w', encoding='utf-8') as f: json.dump(summary, f, indent=1, ensure_ascii=False)
+    with open(outp(base, '_summary.html'), 'w', encoding='utf-8') as f: f.write(render_html(summary))
     try:                                                     # per-spin handoff for a downstream board recognizer (slot-video-recog / te-ldplayer)
         from .handoff import build as _handoff; _handoff(mp4, say)
     except Exception as e: say(f'handoff not made: {e!r}')
     try:                                                     # accumulate this video's features into the persistent per-game ledger
-        from .ledger import add as _ledger; _ledger(base + '_summary.json', say)
+        from .ledger import add as _ledger; _ledger(find(base, '_summary.json'), say)
     except Exception as e: say(f'ledger not updated: {e!r}')
-    _pdf(base + '_summary.html', say)
+    _pdf(find(base, '_summary.html'), say)
     lo, hi = summary['rtp_95']
     say(f'spins {summary["spins"]}  RTP {summary["rtp"]:.1%} ({lo and f"{lo:.0%}"}~{hi and f"{hi:.0%}"})  hit 1/{summary["hit_every_n"]}  '
         f'bet {bet:,}  read {R["read_ok"]:.0%}  -> {os.path.basename(base)}_summary.html')
@@ -574,7 +575,7 @@ th{{background:#f3f3f3}}td:first-child,th:first-child{{text-align:left}}.big{{fo
 
 # ---------------- several videos of the same slot (multi-emulator run) -> one report ----------------
 def _stats_of(mp4):
-    p = mp4[:-4] + '_stats.json'
+    p = find(base_of(mp4), '_stats.json')
     if not os.path.exists(p): return {}
     with open(p, encoding='utf-8') as f: return json.load(f)
 
@@ -599,11 +600,11 @@ def _lock_alive(lock):
 
 def fresh_summary(mp4, app_id=None, say=print):
     """the video's summary: reuse it if up to date, wait if its analysis is running right now, else analyse"""
-    base = mp4[:-4]; js = base + '_summary.json'; lock = base + '.analyzing'; told = False
+    base = base_of(mp4); js = find(base, '_summary.json'); lock = prod(base, '.analyzing'); told = False
     while _lock_alive(lock):
         if not told: say(f'waiting for the analysis already running on {os.path.basename(mp4)}'); told = True
         time.sleep(10)
-    if os.path.exists(js) and os.path.exists(base + '_spins.tsv') and os.path.getmtime(js) >= os.path.getmtime(mp4):
+    if os.path.exists(js) and os.path.exists(find(base, '_spins.tsv')) and os.path.getmtime(js) >= os.path.getmtime(mp4):
         with open(js, encoding='utf-8') as f: return json.load(f)
     return analyze(mp4, app_id, say=say)
 
@@ -611,7 +612,7 @@ def load_spins(base, feat=False):
     """[(time, bet, win)] from <base>_spins.tsv. feat=True -> [(time, bet, win, is_feature)] where is_feature is
     True/False from the 'type' column, or None when the file predates that column (old analysis -> type unknown)."""
     out = []
-    with open(base + '_spins.tsv', encoding='utf-8') as f:
+    with open(find(base, '_spins.tsv'), encoding='utf-8') as f:
         next(f, None)
         for line in f:
             p = line.rstrip('\n').split('\t')
@@ -627,7 +628,7 @@ def merge(videos, out_base, app_id=None, say=print):
     for v in videos:
         try: s = fresh_summary(v, app_id, say)
         except (SystemExit, Exception) as e: say(f'{os.path.basename(v)}: not used ({e!r})'); continue
-        parts.append((v, s, load_spins(v[:-4]), _stats_of(v)))
+        parts.append((v, s, load_spins(base_of(v)), _stats_of(v)))
     if not parts: raise SystemExit('none of the videos could be analysed')
     wins = [w for _, _, rows, _ in parts for _, _, w in rows]; bets = [b for _, _, rows, _ in parts for _, b, _ in rows]
     if not wins: raise SystemExit('no spins in these videos')
@@ -664,15 +665,15 @@ def merge(videos, out_base, app_id=None, say=print):
         'features': _merge_features(parts, n, core['total_bet']),
         'meter_read_rate': min(s['meter_read_rate'] for _, s, _, _ in parts),
     }
-    with open(out_base + '_spins.tsv', 'w', encoding='utf-8') as f:
+    with open(outp(out_base, '_spins.tsv'), 'w', encoding='utf-8') as f:
         f.write('spin\tvideo\ttime\tbet\twin\tx_bet\ttype\n')
         for i, ((vn, t, b, w), isf) in enumerate(zip(allsp, feat_flags), 1):
             f.write(f'{i}\t{vn}\t{t}\t{b:.0f}\t{w:.0f}\t{w / b:.2f}\t{"feature" if isf else "base"}\n')
-    with open(out_base + '_summary.json', 'w', encoding='utf-8') as f: json.dump(summary, f, indent=1, ensure_ascii=False)
-    with open(out_base + '_summary.html', 'w', encoding='utf-8') as f: f.write(render_merged_html(summary))
-    _pdf(out_base + '_summary.html', say)
+    with open(outp(out_base, '_summary.json'), 'w', encoding='utf-8') as f: json.dump(summary, f, indent=1, ensure_ascii=False)
+    with open(outp(out_base, '_summary.html'), 'w', encoding='utf-8') as f: f.write(render_merged_html(summary))
+    _pdf(find(out_base, '_summary.html'), say)
     lo, hi = core['rtp_95']
-    say(f"MERGED {len(parts)} videos, spins {n}  RTP {core['rtp']:.1%} ({lo and f'{lo:.0%}'}~{hi and f'{hi:.0%}'})  -> {out_base}_summary.html")
+    say(f"MERGED {len(parts)} videos, spins {n}  RTP {core['rtp']:.1%} ({lo and f'{lo:.0%}'}~{hi and f'{hi:.0%}'})  -> {find(out_base, '_summary.html')}")
     return summary
 
 def _merge_features(parts, n, tot_bet):
@@ -737,20 +738,22 @@ def _fsafe(name, slot=None):
 def merge_group(group, app_id, say=print):
     """every video of one multi-emulator run (stats.json group == id) -> one merged report per slot. -> [html paths]"""
     vdir = video_dir(app_id); by_slot = {}
-    for f in sorted(os.listdir(vdir)):
-        if not f.endswith('_stats.json'): continue
+    for statsf in sorted(glob.glob(os.path.join(vdir, '**', '*_stats.json'), recursive=True)):
         try:
-            with open(os.path.join(vdir, f), encoding='utf-8') as fh: st = json.load(fh)
+            with open(statsf, encoding='utf-8') as fh: st = json.load(fh)
         except (OSError, ValueError): continue
-        mp4 = os.path.join(vdir, f[:-len('_stats.json')] + '.mp4')
+        base = base_of(statsf); mp4 = find(base, '.mp4')
         if st.get('group') == group and os.path.exists(mp4) and (st.get('video_s') or 0) >= 60:
-            by_slot.setdefault((st.get('slot'), st.get('name') or st.get('slot')), []).append(mp4)
+            by_slot.setdefault((st.get('slot'), st.get('name') or st.get('slot')), []).append((base, mp4))
     out = []
-    for (slot, name), vids in by_slot.items():
+    for (slot, name), items in by_slot.items():
+        vids = [mp4 for _, mp4 in items]
+        gdir = os.path.dirname(items[0][0])                 # the game-root folder (every video of this slot shares it)
+        out_base = os.path.join(gdir, f'{group}_{_fsafe(name, slot)}_merged')
         say(f'--- {name}: {len(vids)} video(s) ---')
         try:
-            merge(vids, os.path.join(vdir, f'{group}_{_fsafe(name, slot)}_merged'), app_id, say)
-            out.append(os.path.join(vdir, f'{group}_{_fsafe(name, slot)}_merged_summary.html'))
+            merge(vids, out_base, app_id, say)
+            out.append(find(out_base, '_summary.html'))
         except SystemExit as e: say(f'{name}: {e}')
         except Exception as e: say(f'{name}: merge failed {e!r}')            # one bad slot must not stop the others
     if not by_slot: say(f'no videos of group {group} in {vdir}')
@@ -766,8 +769,10 @@ def reanalyze_all(app_id, force=False, gate=0, say=print):
     """Re-run analysis on every video of one app so old reports pick up the current buckets / tables, then rebuild
     the per-run merged reports and the overview. Resumable: videos already on this version are skipped unless force."""
     vdir = video_dir(app_id)
-    vids = [os.path.join(vdir, f) for f in sorted(os.listdir(vdir)) if f.endswith('.mp4') and not f.endswith('_clean.mp4')]
-    todo = [v for v in vids if force or not _is_current(v[:-4] + '_summary.json')]
+    vids = sorted(v for v in glob.glob(os.path.join(vdir, '*.mp4'))               # legacy flat layout
+                  + glob.glob(os.path.join(vdir, '*', 'raw', '*.mp4'))            # new per-game layout (only real recordings in raw/)
+                  if not v.endswith('_clean.mp4'))
+    todo = [v for v in vids if force or not _is_current(find(base_of(v), '_summary.json'))]
     say(f'重新辨識：{len(todo)} / {len(vids)} 支（{len(vids) - len(todo)} 支已是 v{VERSION}，跳過）')
     for i, v in enumerate(todo, 1):
         say(f'[{i}/{len(todo)}] {os.path.basename(v)}')
@@ -775,10 +780,9 @@ def reanalyze_all(app_id, force=False, gate=0, say=print):
         except SystemExit as e: say(f'  {os.path.basename(v)} -> {e}')
         except Exception as e: say(f'  {os.path.basename(v)} -> failed {e!r}')
     groups = set()
-    for f in os.listdir(vdir):
-        if not f.endswith('_stats.json'): continue
+    for statsf in glob.glob(os.path.join(vdir, '**', '*_stats.json'), recursive=True):
         try:
-            with open(os.path.join(vdir, f), encoding='utf-8') as fh: g = json.load(fh).get('group')
+            with open(statsf, encoding='utf-8') as fh: g = json.load(fh).get('group')
             if g: groups.add(g)
         except (OSError, ValueError): pass
     for g in sorted(groups):

@@ -66,3 +66,49 @@ def video_dir(app_id):
     d = CFG.get('video_dir') or 'videos'
     if not os.path.isabs(d): d = os.path.join(ROOT, d)
     d = os.path.join(d, app_id); os.makedirs(d, exist_ok=True); return d
+
+# ---- product layout --------------------------------------------------------------------
+# One recording = one base path  videos/<app>/<slot>/<ts>_<name>  (the game-root prefix).
+# Its products live in bucket subfolders beside it; a lock / unknown suffix stays at game-root.
+PROD_GROUP = {
+    '.mp4': 'raw', '_clean.mp4': 'raw', '_clean.txt': 'raw', '_concat.txt': 'raw', '_scrcpy.log': 'raw',
+    '_meter.json': 'meta', '_stats.json': 'meta', '_handoff.json': 'meta', '_timeline.csv': 'meta',
+    '_summary.json': 'report', '_summary.html': 'report', '_summary.pdf': 'report', '_spins.tsv': 'report',
+    '_snaps': 'frames', '_features': 'frames',
+}
+BUCKETS = ('raw', 'meta', 'report', 'frames')
+_SUF_BY_LEN = sorted(PROD_GROUP, key=len, reverse=True)
+
+def prod(base, suf, make=True):
+    """Full path of product <suf> for recording <base>, routed into its bucket subfolder.
+    Locks / unknown suffixes stay at the game-root next to base. Inverse: base_of()."""
+    d, name = os.path.split(base)
+    sub = PROD_GROUP.get(suf)
+    if sub: d = os.path.join(d, sub)
+    if make and d: os.makedirs(d, exist_ok=True)
+    return os.path.join(d, name + suf)
+
+def base_of(path):
+    """Inverse of prod(): a product path (new bucketed OR old flat) -> its canonical base
+    (.../<ts>_<name> at the game-root). Strips a trailing bucket dir, then the known suffix."""
+    d, fn = os.path.split(path)
+    if os.path.basename(d) in BUCKETS: d = os.path.dirname(d)
+    for suf in _SUF_BY_LEN:
+        if fn.endswith(suf) and len(fn) > len(suf): return os.path.join(d, fn[:-len(suf)])
+    return os.path.join(d, os.path.splitext(fn)[0])
+
+def find(base, suf):
+    """Path of product <suf> for READING: the new bucketed location if it exists, else the legacy flat path
+    if it exists, else the bucketed path (never creates a dir). Lets old flat recordings be read until migrated."""
+    new = prod(base, suf, make=False)
+    if os.path.exists(new): return new
+    flat = base + suf
+    return flat if os.path.exists(flat) else new
+
+def outp(base, suf):
+    """Write destination: overwrite the product where it already sits (flat or bucketed), else the new bucketed
+    location; creates the containing dir. Avoids leaving a flat+bucketed duplicate when re-run before migration."""
+    p = find(base, suf)
+    d = os.path.dirname(p)
+    if d: os.makedirs(d, exist_ok=True)
+    return p

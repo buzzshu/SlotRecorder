@@ -28,7 +28,7 @@ Machine-readable lines for the GUI:  PROGRESS <recorded>/<total>   STATUS <state
 """
 import argparse, csv, json, math, os, subprocess, sys, time
 import cv2
-from .config import CFG, TOOLS, ROOT, video_dir
+from .config import CFG, TOOLS, ROOT, video_dir, prod, base_of
 from . import device as d
 from .device import log, StopRequested
 from .app import App
@@ -99,8 +99,9 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
         log(f'not enough disk space in {vdir}: {d.free_disk_gb(vdir):.1f} GB free'); return 2
     group = os.environ.get('SLOTREC_GROUP', '')              # multi-emulator run: several jobs start the same slot together
     fname = name if name.isascii() else slot_id               # Chinese display names: ASCII file names (OpenCV / tools)
-    base = os.path.join(vdir, f'{time.strftime("%Y%m%d_%H%M%S")}_{fname}' + (f'_e{d.IDX}' if group else ''))
-    snapdir = base + '_snaps'; os.makedirs(snapdir, exist_ok=True)
+    gdir = os.path.join(vdir, slot_id); os.makedirs(gdir, exist_ok=True)   # one game = one folder; products go into bucket subfolders under it
+    base = os.path.join(gdir, f'{time.strftime("%Y%m%d_%H%M%S")}_{fname}' + (f'_e{d.IDX}' if group else ''))
+    snapdir = prod(base, '_snaps')                            # frames/<name>_snaps  (prod makes the dir)
     log(f'=== {p["name"]} / {name}  {minutes} min  (emulator {d.IDX} {d.SER}) ===')
     log('STATUS entering')
     if not d.ensure_running(): log('device not found:', d.SER); return 2
@@ -135,11 +136,11 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
     def recorded(): return sum(x for _, x in segs)
     def vt(): return recorded() + (time.time() - cur['t0'] if cur['p'] is not None else 0)   # position in the final video
     def start_seg(remaining):
-        path = f'{base}_seg{len(segs)+1}.mkv'; lim = max(1, math.ceil(remaining))
+        path = prod(base, '.mp4')[:-4] + f'_seg{len(segs)+1}.mkv'; lim = max(1, math.ceil(remaining))   # segments sit beside the final mp4 in raw/
         cmd = [TOOLS['scrcpy'], '-s', d.SER, '--no-window', '--no-audio', f'--max-fps={CFG["max_fps"]}',
                f'--video-bit-rate={CFG["bitrate"]}', f'--record={path}', f'--time-limit={lim}']
         if kfi: cmd.append(f'--video-codec-options=i-frame-interval:float={kfi}')   # dense keyframes -> precise clean cuts
-        cur['p'] = subprocess.Popen(cmd, env=env, stdout=open(base + '_scrcpy.log', 'a'), stderr=subprocess.STDOUT, creationflags=_NOWIN)
+        cur['p'] = subprocess.Popen(cmd, env=env, stdout=open(prod(base, '_scrcpy.log'), 'a'), stderr=subprocess.STDOUT, creationflags=_NOWIN)
         cur['path'] = path; cur['t0'] = time.time(); log('recording segment', len(segs)+1, f'({lim}s left)')
     def close_seg():
         pr, path = cur['p'], cur['path']
@@ -432,7 +433,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
         except Exception as e: log('close_seg failed', repr(e))
         log('STATUS finishing')
         st['elapsed_s'] = int(time.time() - t0); st['segments'] = [(os.path.basename(x), round(y, 1)) for x, y in segs]
-        mp4 = base + '.mp4'; ok = False
+        mp4 = prod(base, '.mp4'); ok = False
         parts = list(dict.fromkeys(x for x, _ in segs if os.path.exists(x) and os.path.getsize(x) > 0))
         if len(parts) == 1 and parts[0].lower().endswith('.mp4'):   # single segment (the common case): already mp4 -> rename, no re-write
             try: os.replace(parts[0], mp4)
@@ -441,7 +442,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                 st['video_s'] = round(probe(mp4), 1)
                 ok = st['video_s'] >= secs * 0.95 or st.get('stopped') == 'precise'
         elif parts:                                                 # several segments (account reset / scrcpy restart) -> stitch back into one
-            lst = base + '_concat.txt'
+            lst = prod(base, '_concat.txt')
             with open(lst, 'w', encoding='utf-8') as fh:
                 for x in parts: fh.write("file '" + x.replace(os.sep, '/') + "'\n")
             if ffmpeg('-f', 'concat', '-safe', '0', '-i', lst, '-c', 'copy', mp4) == 0 and os.path.exists(mp4) and os.path.getsize(mp4) > 0:
@@ -455,10 +456,10 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
         if os.path.exists(mp4):
             try: finish_outputs(mp4, st)
             except Exception as e: log('timeline write failed', repr(e))
-        with open(base + '_stats.json', 'w', encoding='utf-8') as f: json.dump(st, f, indent=1, ensure_ascii=False)
+        with open(prod(base, '_stats.json'), 'w', encoding='utf-8') as f: json.dump(st, f, indent=1, ensure_ascii=False)
         log('done', 'OK' if ok else 'INCOMPLETE', f"video {st.get('video_s', 0)}s ->", mp4)
         if os.path.exists(mp4) and st.get('video_s', 0) >= 60 and CFG.get('auto_analyze', True):
-            flag = base + '.analyzing'                  # set BEFORE the spawn: a merge must not start the same analysis
+            flag = prod(base, '.analyzing')             # set BEFORE the spawn: a merge must not start the same analysis (lock stays at game-root)
             try:                                        # statistics in the background, low priority; next slot starts now
                 open(flag, 'w').close()
                 gate = str(max(1, int(CFG.get('analyze_concurrency', 2) or 2)))   # cap simultaneous analyses so a big batch doesn't thrash
@@ -487,8 +488,8 @@ def removable(row):
                                   or info.get('btn') or info.get('centre', 0) >= 3)
 
 def finish_outputs(mp4, st):
-    base = mp4[:-4]
-    with open(base + '_timeline.csv', 'w', newline='', encoding='utf-8-sig') as f:
+    base = base_of(mp4)
+    with open(prod(base, '_timeline.csv'), 'w', newline='', encoding='utf-8-sig') as f:
         w = csv.writer(f); w.writerow(['start', 'end', 'seconds', 'stuck_or_reset', 'what_happened'])
         for a, b, info in st['timeline']: w.writerow([hms(a), hms(b), round(b - a), 'yes' if removable((a, b, info)) else '', info])
         for i, (_, x) in enumerate(st.get('segments', [])[:-1]):

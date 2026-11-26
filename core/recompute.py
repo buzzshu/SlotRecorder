@@ -17,7 +17,7 @@ Usage:
 """
 import glob, json, os, sys, time
 from .analyze import _reconstruct, _summarize, render_html, write_spins_tsv
-from .config import CFG, ROOT
+from .config import CFG, ROOT, find, outp, base_of
 
 
 def _videos_root():
@@ -30,34 +30,35 @@ def _bases(args):
     root = _videos_root()
     meters = []
     if not args:
-        meters = glob.glob(os.path.join(root, '*', '*_meter.json'))
+        meters = glob.glob(os.path.join(root, '**', '*_meter.json'), recursive=True)
     for a in args:
         if a.endswith('_meter.json') and os.path.exists(a):
             meters.append(a)
         elif os.path.isdir(a):
-            meters += glob.glob(os.path.join(a, '*_meter.json'))
+            meters += glob.glob(os.path.join(a, '**', '*_meter.json'), recursive=True)
         else:                                                   # treat as an app id under the videos root
-            meters += glob.glob(os.path.join(root, a, '*_meter.json'))
-    return sorted({m[:-len('_meter.json')] for m in meters})
+            meters += glob.glob(os.path.join(root, a, '**', '*_meter.json'), recursive=True)
+    return sorted({base_of(m) for m in meters})
 
 
 def recompute_one(base, say=print):
     """replay the accounting over one cached video; rewrite its _summary.json / _spins.tsv / _summary.html in place.
     -> (old_rtp, new_rtp, summary) or None when the cache is incomplete."""
-    cache, statsf = base + '_meter.json', base + '_stats.json'
+    cache, statsf = find(base, '_meter.json'), find(base, '_stats.json')
     if not (os.path.exists(cache) and os.path.exists(statsf)):
         say(f'  跳過（缺快取）: {os.path.basename(base)}'); return None
     with open(cache, encoding='utf-8') as f: c = json.load(f)
     with open(statsf, encoding='utf-8') as f: stats = json.load(f)
     series = [tuple(x) for x in c['series']]; bet_reads = [tuple(x) for x in c['bets']]
     fps = c.get('fps') or 4
-    app_id = stats.get('app') or os.path.basename(os.path.dirname(os.path.abspath(base)))
+    ab = os.path.abspath(base)
+    app_id = stats.get('app') or os.path.basename(os.path.dirname(os.path.dirname(ab)))   # videos/<app>/<slot>/<base>
     prof = json.load(open(os.path.join(ROOT, 'apps', app_id, 'profile.json'), encoding='utf-8'))
 
     old_rtp = None
-    if os.path.exists(base + '_summary.json'):
+    if os.path.exists(find(base, '_summary.json')):
         try:
-            with open(base + '_summary.json', encoding='utf-8') as f: old_rtp = json.load(f).get('rtp')
+            with open(find(base, '_summary.json'), encoding='utf-8') as f: old_rtp = json.load(f).get('rtp')
         except (ValueError, OSError): pass
 
     t0 = time.time()
@@ -65,9 +66,9 @@ def recompute_one(base, say=print):
     summary, trig = _summarize(base, prof, stats, series, R, None, app_id, t0, say=lambda *_: None)
     summary['recomputed_from_cache'] = True                     # mark: features are not frame-confirmed
 
-    write_spins_tsv(base + '_spins.tsv', R['spins'], R['bet'], trig)
-    with open(base + '_summary.json', 'w', encoding='utf-8') as f: json.dump(summary, f, indent=1, ensure_ascii=False)
-    with open(base + '_summary.html', 'w', encoding='utf-8') as f: f.write(render_html(summary))
+    write_spins_tsv(outp(base, '_spins.tsv'), R['spins'], R['bet'], trig)   # update in place (flat or bucketed), never create a duplicate
+    with open(outp(base, '_summary.json'), 'w', encoding='utf-8') as f: json.dump(summary, f, indent=1, ensure_ascii=False)
+    with open(outp(base, '_summary.html'), 'w', encoding='utf-8') as f: f.write(render_html(summary))
 
     nr = summary['rtp']
     tag = f'{old_rtp:.1%} → {nr:.1%}' if old_rtp is not None else f'{nr:.1%}'
