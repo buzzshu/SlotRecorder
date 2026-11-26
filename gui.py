@@ -6,7 +6,7 @@ from tkinter import ttk, messagebox, simpledialog, filedialog
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(ROOT); sys.path.insert(0, ROOT)
-from core.config import CFG, TOOLS, video_dir, find, base_of, save as save_cfg, load as load_cfg
+from core.config import CFG, TOOLS, video_dir, find, base_of, adv, adv_nz, save as save_cfg, load as load_cfg
 from core.app import App, list_apps, X_LIB
 from core.vision import imwrite, imread
 from core import device as d
@@ -103,7 +103,7 @@ class Gui(tk.Tk):
         self.r_var = tk.IntVar(value=1)
         ttk.Spinbox(run, from_=1, to=MAX_REPEAT, width=3, textvariable=self.r_var, state='readonly').pack(side='left')
         ttk.Label(run, text='次').pack(side='left', padx=(0, 6))
-        self.precise_var = tk.BooleanVar(value=bool(CFG.get('precise_default', False)))   # kept for _start / 接續; UI toggle removed
+        self.precise_var = tk.BooleanVar(value=bool(adv('precise_default')))   # kept for _start / 接續; UI toggle removed
         ttk.Button(run, text='■ 停止此台', command=self._stop).pack(side='left', padx=(12, 4))
         ttk.Button(run, text='■ 全部停止', command=self._stop_all).pack(side='left')
         ttk.Button(run, text='💸 沒錢了·清除重跑', command=self._reset_now).pack(side='left', padx=(12, 0))
@@ -690,9 +690,9 @@ class Gui(tk.Tk):
         if n > 1 or r > 1: return self._start_multi(a, idx, ids, n, at, r=r)
         if at is None:
             pr = self.precise_var.get()
-            if pr: total = len(ids) * float(CFG.get('precise_max_minutes') or 240)
+            if pr: total = len(ids) * float(adv_nz('precise_max_minutes'))
             if not messagebox.askokcancel('開始錄製', f'{a.p["name"]} @ 模擬器 {self.emu_name(idx)}：{len(ids)} 款，' + (
-                    f'每款錄到 RTP 範圍 ±{CFG.get("precise_pp") or 10} 個百分點為止（每款最多 {CFG.get("precise_max_minutes") or 240} 分鐘，含之前錄過的局數）'
+                    f'每款錄到 RTP 範圍 ±{adv_nz("precise_pp")} 個百分點為止（每款最多 {adv_nz("precise_max_minutes")} 分鐘，含之前錄過的局數）'
                     if pr else f'共 {total:.0f} 分鐘') + '\n\n錄製期間請不要操作這台模擬器。要中途停止請按「■ 停止此台」。', parent=self): return
             if not self._preflight(idx, total): return
             self._launch(idx, a.id, ids, time.strftime('%Y%m%d_%H%M%S') + f'_e{idx}', precise=pr)
@@ -715,7 +715,7 @@ class Gui(tk.Tk):
         precise = self.precise_var.get() if precise is None else precise
         r = max(1, int(r))
         rows = {i: float(self.tree.set(i, 'min') or 60) for i in ids} if ask else {rw['id']: float(rw.get('minutes') or 60) for rw in a.slots()}
-        if precise: rows = {i: float(CFG.get('precise_max_minutes') or 240) for i in ids}; r = 1    # precise stops on its own -> no repeat
+        if precise: rows = {i: float(adv_nz('precise_max_minutes')) for i in ids}; r = 1    # precise stops on its own -> no repeat
         per = {i: max(1, round(rows.get(i, 60))) for i in ids}                    # each emulator records the FULL length
         use, new, inst = self._multi_plan(idx, n)
         if new and not TOOLS['ldconsole']: messagebox.showerror('同時錄製', '找不到 ldconsole.exe，無法建立新模擬器（設定 → LDPlayer 資料夾）', parent=self); return
@@ -731,7 +731,7 @@ class Gui(tk.Tk):
             per_vals = ", ".join(f"{v:.0f}" for v in dict.fromkeys(per.values()))
             vids = len(use) * r                                                  # videos of each slot (N emulators × R cycles)
             msg = (f'{a.p["name"]}：{len(ids)} 款，{len(use)} 台同時錄、每款每台錄 {per_vals} 分鐘完整影片，重複 {r} 次\n'
-                   + (f'（夠準就停：RTP 範圍 ±{CFG.get("precise_pp") or 10} 個百分點就提早換下一款，上面是最多的時間）\n' if precise else '')
+                   + (f'（夠準就停：RTP 範圍 ±{adv_nz("precise_pp")} 個百分點就提早換下一款，上面是最多的時間）\n' if precise else '')
                    + f'→ 每款會得到 {vids} 支影片（{len(use)} 台 × {r} 次），全部合併成一份統計\n'
                    + f'→ 全程約 {one_cycle * r:.0f} 分鐘（一輪約 {one_cycle:.0f} 分鐘 × {r} 次）\n\n使用：{"、".join(names)}\n')
             if new:
@@ -845,7 +845,7 @@ class Gui(tk.Tk):
             messagebox.showinfo('清除重跑', f'模擬器 {self.emu_name(idx)} 沒有在錄製，不用清除重跑。', parent=self); return
         try: mode = App(j['app']).p.get('reset', 'pm_clear') if j and j.get('app') else 'pm_clear'
         except Exception: mode = 'pm_clear'
-        if mode == 'none' or (mode == 'new_instance' and not CFG.get('new_instance_reset', True)):
+        if mode == 'none' or (mode == 'new_instance' and not adv('new_instance_reset')):
             if not messagebox.askyesno('清除重跑',
                     f'這款 app 沒有設定「沒錢自動重來」的方式' + ('（需在設定開啟「自動建新模擬器」）' if mode == 'new_instance' else '') +
                     '。\n現在送出重跑，可能會改成「停止並保存影片」。\n仍要送出嗎？', parent=self):
@@ -863,7 +863,7 @@ class Gui(tk.Tk):
     def _cleanup_videos(self):
         """刪掉已分析成功、且超過 N 天的原始 .mp4（報告/統計/特色片段全留）。先列清單給使用者確認。"""
         from core import cleanup
-        days = int(CFG.get('keep_video_days', 7))
+        days = int(adv('keep_video_days'))
         vdirs = {video_dir(aid) for aid, _ in self.apps} or {video_dir('')}
         items = []
         for vd in vdirs: items += cleanup.purgeable(vd, days)

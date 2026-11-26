@@ -21,9 +21,7 @@ def check(app, slot_ids, emu_idxs, vdir, need_disk_gb=0, need_ram_gb=0):
     for idx in emu_idxs:
         ok = (not inst) or idx in inst                              # no ldconsole -> can't list, don't fail
         rows.append((ok, f'模擬器 {idx}', '找得到' if ok else '清單裡找不到這台（LDPlayer 資料夾設定？）'))
-    p = app.p
     for sid in slot_ids:
-        need = [sid, p['ingame_marker'], p['lobby_marker'], p['spin_btn']] + ([p['low_coins']] if p.get('low_coins') else [])
-        missing = [n for n in need if not app.t.has(n)]
+        missing = [n for n in app.required_templates(sid) if not app.t.has(n)]
         rows.append((not missing, f'{sid} 模板', '齊' if not missing else '缺 ' + ', '.join(missing)))
     return rows

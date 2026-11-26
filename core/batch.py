@@ -166,8 +166,8 @@ def run(app_id, slot_ids, job, log_dir, minutes=None, split=1, group='', res=Non
         r = rows.get(sid, {'name': sid, 'minutes': 60})
         mins = minutes or float(r.get('minutes') or 60)
         if precise and not minutes:                            # 夠準就停: the list's minutes become the per-game cap
-            from .config import CFG
-            mins = float(CFG.get('precise_max_minutes') or 240)
+            from .config import adv_nz
+            mins = float(adv_nz('precise_max_minutes'))
         # NOTE: in a group run every emulator records the FULL minutes (N emulators x R cycles = more samples of the same slot),
         # not minutes/N. The videos all carry the group id, so core.analyze --group merges them into one report per slot.
         log(f'SLOT {i}/{len(slot_ids)} {sid}')

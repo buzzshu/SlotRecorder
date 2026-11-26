@@ -123,6 +123,11 @@ logs/                                   工作紀錄（job_*.json / job_*.log）
 命令列（進階，在 SlotRecorder 資料夾）：
 `python -m core.batch --app lightning_link --slots bzzf_golden5 --emu 1`　`python -m core.analyze 影片.mp4`　`python -m core.pack`
 
+## 改程式之前 / 之後（測試）
+- `run_tests.bat`:單元測試(不需模擬器,1 秒)+ 統計回歸比對。
+- 要改 `core\analyze.py` 的記帳邏輯時:先 `python -m core.regress snapshot` 記下現在的數字,改完跑 `python -m core.regress`,會列出哪幾支影片的數字變了(用各影片快取的餘額序列重算,不讀 mp4)。
+- 進階設定(特色跳過秒數、讀取率門檻、截圖保留天數…)的預設值與說明都在 `core\config.py` 的 `ADVANCED` 表;要改就把該鍵寫進 `config.json`。
+
 ## 複製到別台電腦
 按 **打包帶走**，把 zip 複製過去解壓，跑一次 `install.bat`，再 `run.bat` → 準備模擬器 → 環境檢查。資料夾路徑可以有中文。
 

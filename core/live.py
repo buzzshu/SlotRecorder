@@ -8,7 +8,7 @@ The final numbers still come from core.analyze on the video (4 readings / s, cat
 """
 import glob, json, os, time
 import numpy as np
-from .config import CFG, ROOT, video_dir, find, base_of
+from .config import CFG, ROOT, video_dir, find, base_of, adv_nz
 from .analyze import stable_values, clean_jumps, build_spins, boot_rtp, find_features, load_spins
 
 LIVE_DIR = os.path.join(ROOT, 'logs', 'live')
@@ -41,7 +41,7 @@ def already_precise(app_id, slot_id, group=''):
     """earlier analysed videos alone are enough for 夠準就停? -> (bool, spins, half)"""
     m = Live(app_id, slot_id, group, idx=-1, write=False).prior
     h = half_width(m) if m else None
-    pp = float(CFG.get('precise_pp') or 10) / 100
+    pp = float(adv_nz('precise_pp')) / 100
     return bool(h is not None and len(m) >= MIN_SPINS and h <= pp), len(m), h
 
 class Live:
@@ -113,7 +113,7 @@ class Live:
             except (OSError, ValueError, KeyError): complete = False         # do not decide on partial data
         h = half_width(allm)
         r.update(total=len(allm), total_rtp=float(np.mean(allm)) if allm else None, half=h)
-        pp = float(CFG.get('precise_pp') or 10) / 100
+        pp = float(adv_nz('precise_pp')) / 100
         ok = complete and h is not None and len(allm) >= MIN_SPINS and h <= pp
         self.streak = self.streak + 1 if ok else 0
         self.last = r

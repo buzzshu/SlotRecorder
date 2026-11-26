@@ -2,7 +2,7 @@
 import csv, json, os, re, subprocess, time
 import cv2
 from . import device as d
-from .config import ROOT, CFG, TOOLS
+from .config import ROOT, CFG, TOOLS, adv
 from .vision import Templates, signature, changed, imwrite
 from .device import log, check_stop
 
@@ -60,6 +60,29 @@ class App:
             cols = ['id', 'name', 'minutes', 'enabled', 'hint']   # hint = lobby step where the catalog scan saw the tile
             w = csv.DictWriter(f, fieldnames=cols); w.writeheader()
             for r in rows: w.writerow({k: r.get(k, '') for k in cols})
+
+    def required_templates(self, slot_id):
+        """template names a recording of <slot_id> cannot run without (one list for record.py and the pre-run selftest).
+        A slot entered through profile 'enter_via' is not found by its lobby thumbnail, so that one is not required."""
+        p = self.p
+        need = [p['ingame_marker'], p['lobby_marker'], p['spin_btn']] + ([p['low_coins']] if p.get('low_coins') else [])
+        if not (p.get('enter_via') or {}).get(slot_id): need = [slot_id] + need
+        return need
+
+    def prune_shots(self):
+        """logs/shots collects a debug screenshot for every popup step and nothing ever removed them (871 MB on one PC).
+        Keep the last shots_keep_days days and at most shots_keep_max of the pop_*.png it wrote. Never raises."""
+        try:
+            fs = [os.path.join(self.shots, f) for f in os.listdir(self.shots)
+                  if f.startswith('pop_') and f.lower().endswith('.png')]     # only what to_lobby() wrote; screenshots a person saved here stay
+            fs = sorted(((os.path.getmtime(f), f) for f in fs), reverse=True)            # newest first
+            cutoff = time.time() - float(adv('shots_keep_days')) * 86400; keep = int(adv('shots_keep_max')); n = 0
+            for i, (mt, f) in enumerate(fs):
+                if i >= keep or mt < cutoff:
+                    try: os.remove(f); n += 1
+                    except OSError: pass
+            if n: log(f'logs/shots: removed {n} old debug screenshot(s)')
+        except Exception as e: log('prune_shots skipped', repr(e))
 
     # ---------- state checks ----------
     def in_game(self, im):
@@ -389,7 +412,7 @@ class App:
         """profile 'turbo': {'xy': [x, y], 'on': [template, ...]} (+ landscape 'turbo_xy'): the fastest spin-animation
         setting (results are the same, only the animation is shorter). Taps the speed button until an 'on' look shows."""
         cfg = self.p.get('turbo')
-        if not cfg or not CFG.get('turbo', True): return None
+        if not cfg or not adv('turbo'): return None
         if time.time() < getattr(self, '_turbo_skip_until', 0): return None        # failed recently -> leave it
         im = im if im is not None else d.grab()
         if not self.in_game(im): return None                                    # popup / lobby: never tap blindly

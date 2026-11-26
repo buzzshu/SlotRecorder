@@ -3,6 +3,21 @@
 版號規則：`主版.次版.修正`。新功能 → 次版 +1；只修 bug → 修正 +1。
 版號寫在 `core/version.py`，GUI 標題列、log、打包檔名都會顯示。
 
+## 1.25.0 — 2026-11-26
+全專案掃描後的修正與整理。統計數字(局數 / RTP / 贏分 / 帳目)對既有 52 支影片**完全不變**(用新的 `core.regress` 新舊程式逐支比對)。
+- **修正:錄製快照自 1.22.0 起全部沒存到** —— 目錄改三層後 `frames/<影片>_snaps` 資料夾沒人建立,`snap()` 寫檔靜默失敗(卡住 / 彈窗 / 沒錢時的現場截圖都沒留下)。現在錄製開始就建立。
+- **修正:「非遊戲時間」可能超過影片長度** —— recorder 忙著重啟 / 重進關時,影片時間軸繼續往前算,但 scrcpy 早已錄到時間上限。實例:一支 119.8 秒的影片記了 11.3→414.7 秒的停機,報告變成「非遊戲 0:06:43、每小時 4,000,000 把、每小時輸贏 −320 億」。兩處一起修:錄製端 `vt()` 以該段的時間上限封頂;分析端把停機區間夾在影片長度內(舊影片重算即修正)。受影響的舊影片共 2 支,只動「非遊戲時間 / 每小時」欄位。
+- **修正:「開錄前自檢」對 `enter_via` 的關誤報缺模板** —— 1.24.0 只改了 `record.py`,自檢裡還有一份同樣的清單沒跟上。現在兩邊共用 `App.required_templates()`。
+- **`logs/shots` 會自動清理** —— `to_lobby()` 每一步都存一張 `pop_*.png`,從來沒人清(一台 PC 累積 871 MB / 1,153 張)。錄製開始時保留最近 `shots_keep_days`(7)天、最多 `shots_keep_max`(400)張;**只清 `pop_*.png`**,手動存進去的截圖不動。
+- **關不掉的付費頁會留證** —— 「疑似付費頁 → BACK」那一步現在存一張 `danger_*.png` 到該影片的 `_snaps`,之後照圖把它的關閉鈕補進 profile `x_templates`。(這類彈窗目前仍可能導致重啟 app,要有實例才能補範本。)
+- **分析:只解碼 meter 小框**(`meter_frames()`)—— ffmpeg 自己裁餘額 / 押注框,不再把整張 720×1280 畫面丟過管線。像素與舊做法逐位元相同(4 個 app、3,850 幀 0 差異;8 支影片重讀的序列與舊快取逐筆相同)。15 分鐘影片 32.7 → 30.5 秒,只快約 7%:實測時間大半花在 OCR(23 秒),不是傳輸。
+- **進階設定集中到 `core/config.py` 的 `ADVANCED` 表** —— `feat_skip_s`、`stuck_bal_s`、`gift_max_x`、`min_read_rate` 等 22 個旋鈕原本散在各檔的 `CFG.get('x', 預設)`,現在預設值與說明都在一處,呼叫端用 `adv('x')`。預設值全部不變;要覆寫照舊寫進 `config.json`。(唯一語意差異:`config.json` 裡明寫 `null` 現在等於「用預設」,以前對某些鍵等於關閉。)
+- **新增測試** —— `run_tests.bat` 或 `python -m unittest discover -s tests`:24 個單元測試(數字解析、OCR 安全按鈕、餘額記帳的金額守恆、模擬一場 400 局逐局還原、路徑版面、每個 app 的 profile 所指的範本都存在),不需模擬器,1 秒內跑完。
+- **新增 `python -m core.regress`** —— 改統計邏輯前 `snapshot`、改完 `check`:用每支影片的快取 `_meter.json` 重算並列出數字有變的影片(52 支約 1 秒)。基準存 `logs/regress_baseline.json`(不進 git)。
+- **CA$H Rally 清單整理** —— 128 筆 → 105 款 + `wolf_run_eclipse`:28 筆 OCR 殘字 / `New_Game_*` 改成正確名稱;23 筆是同一張橫幅 banner 的左 / 右三分之一(點哪一份都進同一款 = 重複),移到 `ignore/`;剩 6 筆圖上沒有可辨識的名稱。profile 備註更正:遊戲是隨等級逐步解鎖(Lv.10 就解了 6 款),不是 Lv.150 才開始。
+- **試過但沒採用**:快取縮放後的 X 範本 —— 實測 194 → 195 ms,沒有差別(時間花在比對不是縮放),已還原。「常駐 `adb shell` 加快點擊」需要模擬器量測,這次沒做。
+- **驗證**:獨立 Verify agent 複查全部改動(抓到 `prune_shots` 原本會連手動截圖一起刪,已改);單元測試 24/24;回歸比對 52 支。
+
 ## 1.24.0 — 2026-11-26
 - **新增 `enter_via` 進關機制(`core/app.py`)** —— 讓錄製器能進「不在大廳方格、要走固定點按序列才到得了」的關(教學 / 活動入口關)。profile `enter_via: {<slot>: [steps]}`,每個 step 是 `{"tap":[x,y]}` 或 `{"template":name,"thresh":..,"region":[x0,y0,x1,y1]}` + 選填 `"wait"`;範本找不到就跳過(best-effort)。`enter_slot` 偵測到該 slot 有 `enter_via` 就先 `to_lobby()` 再跑序列、再用原 wait-loop 確認 `in_game`;卡在大廳 30s 會 re-run 序列。**非 `enter_via` 的關走原 `find_slot`(縮圖捲動)路徑逐行不變**(獨立 Verify agent 確認無回歸)。
 - **`core/record.py`**:啟動的範本斷言對 `enter_via` 關**免除「縮圖範本」要求**(它們不靠縮圖找);`ingame_marker` / `lobby_marker` / `spin_btn`(+`low_coins`)照常要求。

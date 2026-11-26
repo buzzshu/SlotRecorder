@@ -13,6 +13,46 @@ DEFAULTS = {
     'spin_interval': 0.25,                        # 連續快速點擊(滾動中點 SPIN=快速停止);新環境打包預設也用 0.25,不靠本機 config.json
 }
 
+# Advanced knobs. NOT written into config.json by the GUI (so a later change of a default here still reaches every
+# PC); add one to config.json by hand to override it. This table is the single place their defaults live — call
+# sites read them with adv('<key>').  key: (default, what it does)
+ADVANCED = {
+    # --- recording ---
+    'keyframe_interval':   (1,     'scrcpy 關鍵幀間隔（秒）；0 = 交給編碼器決定'),
+    'feat_skip_s':         (6,     '遊戲內餘額凍結超過這麼多秒 → 視為特色／大獎動畫，開始掃點跳過'),
+    'feat_tap_s':          (0.1,   '特色／pick bonus 期間每次點擊的間隔（秒）'),
+    'stuck_bal_s':         (150,   '遊戲內畫面在動但餘額這麼多秒沒變 → 視為卡住（BACK，再不行重啟 app）'),
+    'live_stats':          (True,  '錄製時即時讀餘額算 LIVE 統計'),
+    'capture_paytable':    (True,  '每款遊戲第一次錄時截賠付表'),
+    'turbo':               (True,  '進遊戲後把速度鍵切到最快（profile 有 turbo 設定才有作用）'),
+    'new_instance_reset':  (True,  '沒錢且 app 無法重置帳號時，自動建一台全新模擬器'),
+    'shots_keep_days':     (7,     'logs/shots 的除錯截圖保留天數'),
+    'shots_keep_max':      (400,   'logs/shots 最多保留幾張（超過刪最舊的）'),
+    # --- analysis ---
+    'auto_analyze':        (True,  '錄完自動在背景分析'),
+    'analyze_concurrency': (2,     '同時進行的分析數上限'),
+    'feature_clips':       (True,  '把偵測到的特色剪成片段'),
+    'auto_pdf':            (True,  '報告自動另存 PDF'),
+    'gift_max_x':          (15,    '餘額跳升 ≥ 這麼多倍押注一律算贏分，不當成關彈窗的贈送'),
+    'min_read_rate_overall': (0.5, '餘額讀取率門檻：RTP／中獎率／整體分布'),
+    'min_read_rate':       (0.6,   '餘額讀取率門檻：特色次數／特色分布'),
+    # --- targets / housekeeping ---
+    'target_spins':        (1000,  '總覽裡每款遊戲的目標局數'),
+    'precise_pp':          (10,    '「夠準就停」的 RTP 95% 範圍半寬（百分點）'),
+    'precise_max_minutes': (240,   '「夠準就停」每款最多錄幾分鐘'),
+    'precise_default':     (False, '預設啟用「夠準就停」'),
+    'keep_video_days':     (7,     '清理舊影片：已分析且超過這麼多天的 mp4 可刪'),
+}
+
+def adv(key):
+    """value of an advanced knob: config.json if set there (and not null), else the ADVANCED default"""
+    v = CFG.get(key)
+    return ADVANCED[key][0] if v is None else v
+
+def adv_nz(key):
+    """like adv(), but 0 / empty in config.json also falls back to the default (numbers that must be > 0)"""
+    return CFG.get(key) or ADVANCED[key][0]
+
 def load():
     cfg = dict(DEFAULTS)
     if os.path.exists(CFG_PATH):

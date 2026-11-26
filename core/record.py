@@ -28,7 +28,7 @@ Machine-readable lines for the GUI:  PROGRESS <recorded>/<total>   STATUS <state
 """
 import argparse, csv, json, math, os, subprocess, sys, time
 import cv2
-from .config import CFG, TOOLS, ROOT, video_dir, prod, base_of
+from .config import CFG, TOOLS, ROOT, video_dir, prod, base_of, adv, adv_nz
 from . import device as d
 from .device import log, StopRequested
 from .app import App
@@ -89,10 +89,9 @@ def cut_clean(mp4, spans, min_len=20):
 def record(app_id, slot_id, minutes, name=None, interval=None):
     app = App(app_id); p = app.p
     interval = interval or float(os.environ.get('SLOTREC_SPIN_INTERVAL') or 0) or CFG.get('spin_interval', 0.25)   # continuous tap
-    need = [p['ingame_marker'], p['lobby_marker'], p['spin_btn']] + ([p['low_coins']] if p.get('low_coins') else [])
-    if not (p.get('enter_via') or {}).get(slot_id): need = [slot_id] + need   # enter_via slots aren't found by a lobby thumbnail
-    for n in need:
+    for n in app.required_templates(slot_id):
         assert app.t.has(n), f'missing template {n}.png in apps/{app_id}/tpl or slots'
+    app.prune_shots()
     missing = [k for k in ('scrcpy', 'ffmpeg', 'ffprobe') if not TOOLS[k]]
     if missing: log('missing tools:', ', '.join(missing), '-> run install.bat or set paths in 設定'); return 2
     name = name or slot_id
@@ -103,7 +102,8 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
     fname = name if name.isascii() else slot_id               # Chinese display names: ASCII file names (OpenCV / tools)
     gdir = os.path.join(vdir, slot_id); os.makedirs(gdir, exist_ok=True)   # one game = one folder; products go into bucket subfolders under it
     base = os.path.join(gdir, f'{time.strftime("%Y%m%d_%H%M%S")}_{fname}' + (f'_e{d.IDX}' if group else ''))
-    snapdir = prod(base, '_snaps')                            # frames/<name>_snaps  (prod makes the dir)
+    snapdir = prod(base, '_snaps')                            # frames/<name>_snaps
+    os.makedirs(snapdir, exist_ok=True)                       # prod() only makes the bucket (frames/), not this folder -> without it every snap() failed silently since 1.22.0
     log(f'=== {p["name"]} / {name}  {minutes} min  (emulator {d.IDX} {d.SER}) ===')
     log('STATUS entering')
     if not d.ensure_running(): log('device not found:', d.SER); return 2
@@ -122,7 +122,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                     app.restart()
                     if not app.enter_slot(slot_id): log('cannot enter slot'); return 2
         st['bet'] = app.min_bet()
-        if p.get('paytable') and CFG.get('capture_paytable', True):    # once per game: paytable / rules screenshots
+        if p.get('paytable') and adv('capture_paytable'):    # once per game: paytable / rules screenshots
             try:
                 from .paytable import capture, has
                 if not has(app, slot_id): log('STATUS paytable'); capture(app, slot_id, say=log)
@@ -133,17 +133,21 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
 
     secs = int(minutes * 60)
     env = dict(os.environ, ADB=TOOLS['adb'])
-    segs = []; cur = {'p': None, 'path': None, 't0': 0}
-    kfi = CFG.get('keyframe_interval', 1)
+    segs = []; cur = {'p': None, 'path': None, 't0': 0, 'lim': 0}
+    kfi = adv('keyframe_interval')
     def recorded(): return sum(x for _, x in segs)
-    def vt(): return recorded() + (time.time() - cur['t0'] if cur['p'] is not None else 0)   # position in the final video
+    def vt():
+        """position in the final video. Capped at the running segment's time limit: scrcpy stops writing there, but this
+        loop may only notice minutes later (it can be busy inside a restart / re-enter) -> an uncapped clock ran past the
+        end of the video and wrote off-game spans longer than the video itself."""
+        return recorded() + (min(time.time() - cur['t0'], cur['lim']) if cur['p'] is not None else 0)
     def start_seg(remaining):
         path = prod(base, '.mp4')[:-4] + f'_seg{len(segs)+1}.mkv'; lim = max(1, math.ceil(remaining))   # segments sit beside the final mp4 in raw/
         cmd = [TOOLS['scrcpy'], '-s', d.SER, '--no-window', '--no-audio', f'--max-fps={CFG["max_fps"]}',
                f'--video-bit-rate={CFG["bitrate"]}', f'--record={path}', f'--time-limit={lim}']
         if kfi: cmd.append(f'--video-codec-options=i-frame-interval:float={kfi}')   # dense keyframes -> precise clean cuts
         cur['p'] = subprocess.Popen(cmd, env=env, stdout=open(prod(base, '_scrcpy.log'), 'a'), stderr=subprocess.STDOUT, creationflags=_NOWIN)
-        cur['path'] = path; cur['t0'] = time.time(); log('recording segment', len(segs)+1, f'({lim}s left)')
+        cur['path'] = path; cur['t0'] = time.time(); cur['lim'] = lim; log('recording segment', len(segs)+1, f'({lim}s left)')
     def close_seg():
         pr, path = cur['p'], cur['path']
         if pr is None: return
@@ -182,7 +186,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
         if bool(getattr(app, '_land', False)) != (im.shape[1] > im.shape[0]): return None
         box = (L.get('meters') or {}).get('balance')
         return ocr.read_box(im, box) if box else None
-    if CFG.get('live_stats', True) and (p.get('meters') or {}).get('balance'):
+    if adv('live_stats') and (p.get('meters') or {}).get('balance'):
         try:
             from .live import Live, READ_EVERY_S
             live = Live(app_id, slot_id, group, d.IDX)
@@ -195,9 +199,9 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
     feat = {'on': False}                                       # off-game win-celebration / feature / pick bonus -> keep sweeping (fast loop) to skip / resolve it
     bal_ref = {'val': None, 't': 0.0}                          # last time the balance meter changed -> reels not resolving = feature / long win
     dims = {'w': 0, 'h': 0}                                     # last grabbed frame size -> screen coords for skip taps
-    FEAT_SKIP_S = float(os.environ.get('SLOTREC_FEAT_SKIP_S') or CFG.get('feat_skip_s', 6))   # in-game but balance frozen this long -> sweep-tap to skip feature animation
-    FEAT_TAP_S = float(os.environ.get('SLOTREC_FEAT_TAP_S') or CFG.get('feat_tap_s', 0.1))     # during a feature / pick -> shorter sleep so it finishes fast (base game keeps `interval`)
-    STUCK_BAL_S = float(os.environ.get('SLOTREC_STUCK_BAL_S') or CFG.get('stuck_bal_s', 150))  # in-game marker lit + screen animating but balance unchanged this long -> pick/jackpot livelock -> escalate (BACK, then restart)
+    FEAT_SKIP_S = float(os.environ.get('SLOTREC_FEAT_SKIP_S') or adv('feat_skip_s'))   # in-game but balance frozen this long -> sweep-tap to skip feature animation
+    FEAT_TAP_S = float(os.environ.get('SLOTREC_FEAT_TAP_S') or adv('feat_tap_s'))     # during a feature / pick -> shorter sleep so it finishes fast (base game keeps `interval`)
+    STUCK_BAL_S = float(os.environ.get('SLOTREC_STUCK_BAL_S') or adv('stuck_bal_s'))  # in-game marker lit + screen animating but balance unchanged this long -> pick/jackpot livelock -> escalate (BACK, then restart)
     sweep = {'i': 0}                                            # rotating grid index for skip taps
     def skip_tap(W, H):
         """tap a point from a rotating grid over the play area. A fixed centre tap only skips animations; a
@@ -264,7 +268,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                     if force or poor or manual or app.low_coins(im):
                         snap('lowcoins', im)
                         mode = p.get('reset', 'pm_clear')
-                        if mode == 'new_instance' and not CFG.get('new_instance_reset', True): mode = 'none'   # GUI 設定 switch
+                        if mode == 'new_instance' and not adv('new_instance_reset'): mode = 'none'   # GUI 設定 switch
                         if mode == 'none':
                             log('OUT OF COINS -> stop (no account reset for this app). Video so far is kept.')
                             st['stopped'] = 'out of coins'; break
@@ -370,6 +374,7 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
                                 d.tap(*ob[0]); st['popups'] += 1; popup_times.append(now); log('OCR tap', ob[1], ob[0]); snap('ocr', im)
                                 tapev('ocr', ob[1])
                             elif dur > 10 and ocr.LAST_DANGER:            # price / BUY page without a NO-THANKS button
+                                if not span.get('danger'): span['danger'] = 1; snap('danger', im)   # keep the page: its close button is what x_templates is missing
                                 d.back(); st['backs'] += 1; back_streak += 1; log('purchase-like page -> BACK (no centre tap)')
                             elif dur > 4 and (H > W or p.get('centre_tap_landscape')) and not ocr.LAST_DANGER:
                                 feat['on'] = True              # celebration / feature / pick bonus: fast loop below keeps sweeping to skip / resolve it
@@ -460,11 +465,11 @@ def record(app_id, slot_id, minutes, name=None, interval=None):
             except Exception as e: log('timeline write failed', repr(e))
         with open(prod(base, '_stats.json'), 'w', encoding='utf-8') as f: json.dump(st, f, indent=1, ensure_ascii=False)
         log('done', 'OK' if ok else 'INCOMPLETE', f"video {st.get('video_s', 0)}s ->", mp4)
-        if os.path.exists(mp4) and st.get('video_s', 0) >= 60 and CFG.get('auto_analyze', True):
+        if os.path.exists(mp4) and st.get('video_s', 0) >= 60 and adv('auto_analyze'):
             flag = prod(base, '.analyzing')             # set BEFORE the spawn: a merge must not start the same analysis (lock stays at game-root)
             try:                                        # statistics in the background, low priority; next slot starts now
                 open(flag, 'w').close()
-                gate = str(max(1, int(CFG.get('analyze_concurrency', 2) or 2)))   # cap simultaneous analyses so a big batch doesn't thrash
+                gate = str(max(1, int(adv_nz('analyze_concurrency'))))   # cap simultaneous analyses so a big batch doesn't thrash
                 pr = subprocess.Popen([sys.executable, '-m', 'core.analyze', mp4, '--gate', gate], cwd=ROOT, stdout=subprocess.DEVNULL,
                                       stderr=subprocess.DEVNULL, creationflags=_NOWIN | getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0))
                 with open(flag, 'w') as f: f.write(str(pr.pid))

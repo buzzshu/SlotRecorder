@@ -9,11 +9,11 @@ without one are matched by the name in the file name.
 """
 import argparse, glob, html, json, math, os, re, shutil, subprocess, sys, tempfile, time
 import numpy as np
-from .config import CFG, ROOT, video_dir, find, base_of
+from .config import CFG, ROOT, video_dir, find, base_of, adv, adv_nz
 from .analyze import spin_stats, load_spins, hms, fmt, BUCKETS, trust_overall, trust_feature
 
 _NOWIN = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-TARGET = lambda: int(CFG.get('target_spins') or 1000)
+TARGET = lambda: int(adv_nz('target_spins'))
 
 def videos_root():
     d = CFG.get('video_dir') or 'videos'
@@ -359,7 +359,7 @@ def _build(app_ids, excel, pdf, say):
     _atomic_write(os.path.join(root, 'overview.json'), json.dumps({'target': TARGET(), 'updated': time.strftime('%F %T'), 'apps': data},
                                                                     ensure_ascii=False, indent=1))
     h = os.path.join(root, '總覽.html'); _atomic_write(h, render(all_games, TARGET()))
-    if pdf and CFG.get('auto_pdf', True): to_pdf(h, say)
+    if pdf and adv('auto_pdf'): to_pdf(h, say)
     say(f'OVERVIEW -> {h}')
     return h
 

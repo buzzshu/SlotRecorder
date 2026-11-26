@@ -13,7 +13,7 @@ output: <video>_spins.tsv   one row per spin (time in video, bet, win, multiple,
 import argparse, glob, html, json, math, os, re, subprocess, sys, time
 import cv2
 import numpy as np
-from .config import CFG, TOOLS, ROOT, video_dir, prod, find, outp, base_of
+from .config import CFG, TOOLS, ROOT, video_dir, prod, find, outp, base_of, adv, adv_nz
 from .ocr import read_number
 from .version import VERSION
 
@@ -95,17 +95,46 @@ def frames(path, fps, size=None):
     finally:
         p.stdout.close(); p.kill()
 
+def meter_frames(path, fps, size, bx, tx=None):
+    """yield (t, balance_crop, bet_crop | None): the same pixels frames() would give at those boxes, but ffmpeg crops
+    them itself, so a few KB per frame cross the pipe instead of the whole 2.7 MB frame.
+    The chain is 'scale=WxH , scale , format=bgr24 , crop' on purpose — it must reproduce frames() bit for bit:
+      * the colour conversion sits BEFORE the crop (cropping in the decoder's yuv420 rounds odd offsets);
+      * resize and conversion stay two separate steps, as in frames() (resize in yuv, then convert). Folded into one
+        step they differ by +-1 on frames that really get resized (a recording whose resolution changes mid-video:
+        the emulator rotates to landscape while the app restarts)."""
+    w_, h_ = size or (W, H)
+    bw, bh = bx[2] - bx[0], bx[3] - bx[1]
+    head = f'fps={fps},scale={w_}:{h_},scale,format=bgr24'
+    if tx:
+        tw, th = tx[2] - tx[0], tx[3] - tx[1]; pw = max(bw, tw)
+        fc = (f'[0:v]{head},split=2[a][b];[a]crop={bw}:{bh}:{bx[0]}:{bx[1]},pad={pw}:{bh}:0:0[c1];'
+              f'[b]crop={tw}:{th}:{tx[0]}:{tx[1]},pad={pw}:{th}:0:0[c2];[c1][c2]vstack=inputs=2[o]')
+        args = ['-filter_complex', fc, '-map', '[o]']; ow, oh = pw, bh + th
+    else:
+        tw = th = 0; args = ['-vf', f'{head},crop={bw}:{bh}:{bx[0]}:{bx[1]}']; ow, oh = bw, bh
+    p = subprocess.Popen([TOOLS['ffmpeg'] or 'ffmpeg', '-v', 'error', '-i', path, *args, '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-'],
+                         stdout=subprocess.PIPE, creationflags=_NOWIN, bufsize=ow * oh * 3 * 8)
+    i, n = 0, ow * oh * 3
+    try:
+        while True:
+            b = p.stdout.read(n)
+            if len(b) < n: break
+            fr = np.frombuffer(b, np.uint8).reshape(oh, ow, 3)
+            yield i / fps, fr[:bh, :bw], (fr[bh:bh + th, :tw] if tx else None); i += 1
+    finally:
+        p.stdout.close(); p.kill()
+
 def read_series(path, boxes, fps=4, progress=None, size=None):
     """-> list of (t, balance|None), list of (t, bet) ; OCR only when the meter pixels changed"""
     bx, tx = boxes['balance'], boxes.get('bet')
     bal, bets = [], []; last_crop = last_val = None; last_bet_t = -99
-    for t, im in frames(path, fps, size):
-        c = im[bx[1]:bx[3], bx[0]:bx[2]]
+    for t, c, tc in meter_frames(path, fps, size, bx, tx):
         if last_crop is not None and np.abs(c.astype(np.int16) - last_crop).mean() < 1.0: v = last_val
         else: v = read_number(c, 0.75); last_crop = c.astype(np.int16); last_val = v
         bal.append((t, v))
         if tx and t - last_bet_t >= 10:
-            b = read_number(im[tx[1]:tx[3], tx[0]:tx[2]], 0.75)
+            b = read_number(tc, 0.75)
             if b: bets.append((t, b)); last_bet_t = t
         if progress and int(t) % 300 == 0 and abs(t - int(t)) < 1e-6: progress(t)
     return bal, bets
@@ -148,7 +177,7 @@ def trust_overall(summary):
     good video's balance reads down to 0.5, even in bursty chunks) showed these barely move — RTP within ~1-3pt,
     the win-size distribution within L1 ~0.05 — so the bar is min_read_rate_overall (default 0.5) AND the balance
     books closed. Feature stats do NOT survive that low -> trust_feature."""
-    thr = CFG.get('min_read_rate_overall'); thr = float(thr) if thr is not None else 0.5
+    thr = float(adv('min_read_rate_overall'))
     return _read_ge(summary, thr) and _books_closed(summary)
 
 def trust_feature(summary):
@@ -157,7 +186,7 @@ def trust_feature(summary):
     by ~40% at 0.5 and to ~zero at 0.4. So features keep the higher bar: min_read_rate (default 0.6).
     Built on top of trust_overall so trust_feature(v) ALWAYS implies trust_overall(v) — even if a custom config
     sets min_read_rate_overall above min_read_rate (the feature bar then becomes the max of the two)."""
-    thr = CFG.get('min_read_rate'); thr = float(thr) if thr is not None else 0.6
+    thr = float(adv('min_read_rate'))
     return trust_overall(summary) and _read_ge(summary, thr)
 
 trustworthy = trust_feature          # backward-compat alias: the original single gate was exactly this 0.6 bar
@@ -195,7 +224,7 @@ def split_step(A, B, between, bet):
 def build_spins(series, vals, bet, gift_windows, seg_bounds):
     """walk balance transitions -> spins list + other events"""
     spins = []; gifts = []; jumps = []; odd = []
-    gmax = float(CFG.get('gift_max_x') or 15)               # a balance jump >= this * bet is a win (feature payout), never a gift
+    gmax = float(adv_nz('gift_max_x'))               # a balance jump >= this * bet is a win (feature payout), never a gift
     def in_any(t, wins): return any(a <= t <= b for a, b in wins)
     for r0, r1 in zip(vals, vals[1:]):
         A, B, t1 = r0[1], r1[1], r1[0]
@@ -298,7 +327,7 @@ def cut_features(mp4, feats, say=print, max_clips=60):
     out = outp(base_of(mp4), '_features')
     if os.path.isdir(out):
         for f in os.listdir(out): os.remove(os.path.join(out, f))
-    if not feats or not CFG.get('feature_clips', True): return
+    if not feats or not adv('feature_clips'): return
     os.makedirs(out, exist_ok=True); ff = TOOLS['ffmpeg'] or 'ffmpeg'
     for i, f in enumerate(sorted(feats, key=lambda f: -f['x'])[:max_clips], 1):
         name = f"{i:02d}_{hms(f['t0']).replace(':', '')}_{f['x']:.0f}x"
@@ -398,7 +427,8 @@ def _summarize(base, prof, stats, series, R, mp4, app_id, t_start, say=print):
     core, mult = spin_stats(wins, [bet] * n)
     tot_bet, tot_win, rtp = core['total_bet'], core['total_win'], core['rtp']; lo, hi = core['rtp_95']
     vid_s = stats.get('video_s') or (series[-1][0] if series else 0)
-    off_s = sum(b - a for a, b, _ in (stats.get('timeline') or []))
+    tl = [(a, b) for a, b, _ in (stats.get('timeline') or [])]
+    off_s = _covered(0, vid_s, tl) if vid_s else sum(b - a for a, b in tl)   # clipped to the video: recordings made before 1.25.0 could log an off-game span that ran past its end (-> play_hours 0, absurd per-hour figures)
     play_h = max(1e-6, (vid_s - off_s) / 3600)
     top = sorted(range(n), key=lambda i: -wins[i])[:10]
     feats = find_features(spins, bet, off_spans(stats) + list(gift_windows), series=series,
@@ -486,7 +516,7 @@ def _analyze(mp4, app_id=None, fps=4, say=print):
 
 def _pdf(html_path, say):
     """PDF copy of a report (headless Edge / Chrome); never fails the analysis"""
-    if not CFG.get('auto_pdf', True): return
+    if not adv('auto_pdf'): return
     try:
         from .overview import to_pdf
         to_pdf(html_path, say)
