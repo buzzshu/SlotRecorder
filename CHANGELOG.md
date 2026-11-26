@@ -3,6 +3,13 @@
 版號規則：`主版.次版.修正`。新功能 → 次版 +1；只修 bug → 修正 +1。
 版號寫在 `core/version.py`，GUI 標題列、log、打包檔名都會顯示。
 
+## 1.24.0 — 2026-11-26
+- **新增 `enter_via` 進關機制(`core/app.py`)** —— 讓錄製器能進「不在大廳方格、要走固定點按序列才到得了」的關(教學 / 活動入口關)。profile `enter_via: {<slot>: [steps]}`,每個 step 是 `{"tap":[x,y]}` 或 `{"template":name,"thresh":..,"region":[x0,y0,x1,y1]}` + 選填 `"wait"`;範本找不到就跳過(best-effort)。`enter_slot` 偵測到該 slot 有 `enter_via` 就先 `to_lobby()` 再跑序列、再用原 wait-loop 確認 `in_game`;卡在大廳 30s 會 re-run 序列。**非 `enter_via` 的關走原 `find_slot`(縮圖捲動)路徑逐行不變**(獨立 Verify agent 確認無回歸)。
+- **`core/record.py`**:啟動的範本斷言對 `enter_via` 關**免除「縮圖範本」要求**(它們不靠縮圖找);`ingame_marker` / `lobby_marker` / `spin_btn`(+`low_coins`)照常要求。
+- **CA$H Rally 新增可錄關 `wolf_run_eclipse`** —— IGT Wolf Run Eclipse,經 **Events → Level Road to Glory → GO SPIN** 進入,**不分等級可玩**(大廳方格全鎖 Lv.150,但這款是 Level-Road 的 spin 關)。profile 加 `enter_via` 設定 + `x_templates:["events_close"]`(Events 面板關閉 X);新範本 `go_spin`、`events_close`,重裁 `ingame_maxbet`(舊的只 0.54、現 1.0)。
+- **驗證**:實錄 2 分鐘 —— `enter_slot` 端到端(退遊戲→Events→Level Road→GO SPIN→in game)29s 成功;`min_bet` 自動找到 8000;**bet OCR 三方交叉一致(balance-drops / bet-meter / recorder 都 = 8000)**、餘額 11,888,400→11,856,400、`balance_check 0.0`(4 局 base ×8000、0 win);產出 `summary.json/.html/.pdf` + `spins.tsv`、`meter_read_rate 0.775`。Verify agent 複查 app.py/record.py 無回歸、無 crash、範本齊全。
+  - 已知限制:長錄時付費 offer 彈窗會干擾(退不掉→restart);正式長錄前把那些彈窗的 X 補進 `x_templates`。
+
 ## 1.23.0 — 2026-11-26
 - **新增 app:CA$H Rally**(`apps/cash_rally/`,package `slots.acg.casino.games.free.android`,Cocos2d-x Lua,直式 720×1280 IGT 賭場)—— profile.json + 3 個 tpl 範本 + **128 款 slots.csv 與縮圖**。meter OCR(餘額/押注)離線實測正確。
 - **`core/catalog.py` 新增 `grid` tile 偵測模式** —— 給「無邊框圓角大圖、無明顯邊緣」的 3 欄方格大廳用(88F/LL 的 edge 模式偵測不到)。對固定欄位做亮度剖面、以 comb-fit 擬合列邊界(固定 pitch + 相位,最大化 cell 中心亮度 − 邊界亮度),只輸出完整可見的列、固定高度切格。**既有 app 走原 edge/anchor 路徑完全不變**(`cfg.get('grid')` 才進新路徑)。

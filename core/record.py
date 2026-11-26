@@ -89,7 +89,9 @@ def cut_clean(mp4, spans, min_len=20):
 def record(app_id, slot_id, minutes, name=None, interval=None):
     app = App(app_id); p = app.p
     interval = interval or float(os.environ.get('SLOTREC_SPIN_INTERVAL') or 0) or CFG.get('spin_interval', 0.25)   # continuous tap
-    for n in [slot_id, p['ingame_marker'], p['lobby_marker'], p['spin_btn']] + ([p['low_coins']] if p.get('low_coins') else []):
+    need = [p['ingame_marker'], p['lobby_marker'], p['spin_btn']] + ([p['low_coins']] if p.get('low_coins') else [])
+    if not (p.get('enter_via') or {}).get(slot_id): need = [slot_id] + need   # enter_via slots aren't found by a lobby thumbnail
+    for n in need:
         assert app.t.has(n), f'missing template {n}.png in apps/{app_id}/tpl or slots'
     missing = [k for k in ('scrcpy', 'ffmpeg', 'ffprobe') if not TOOLS[k]]
     if missing: log('missing tools:', ', '.join(missing), '-> run install.bat or set paths in 設定'); return 2

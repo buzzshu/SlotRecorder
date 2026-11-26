@@ -1,4 +1,5 @@
 id,name,minutes,enabled,hint
+wolf_run_eclipse,Wolf_Run_Eclipse,60,0,
 stinkin_rich,Stinkin_Rich,60,0,1
 high_roller,High_Roller,60,0,1
 fortune_coin_respin,Fortune_Coin_Respin,60,0,1

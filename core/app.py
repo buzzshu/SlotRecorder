@@ -277,10 +277,32 @@ class App:
         s, c = self.t.find(im, slot_id + '_ingame', 0.6)
         log(f'verify slot {slot_id}: {s:.2f}'); return c is not None
 
+    def _enter_via(self, steps):
+        """Reach a slot that is NOT a lobby-grid tile by a fixed navigation sequence (profile 'enter_via').
+        Each step: {"tap":[x,y]} (fixed) or {"template":name,"thresh":0.7,"region":[x0,y0,x1,y1]} (match-and-tap),
+        plus optional "wait" seconds. A template that is not found is skipped (best-effort); the caller's in_game
+        wait-loop (and the 30 s lobby retry that re-runs this) still guard the result."""
+        for s in steps:
+            check_stop()
+            if s.get('template'):
+                _, c = self.t.find(d.grab(), s['template'], s.get('thresh', 0.7),
+                                   region=tuple(s['region']) if s.get('region') else None)
+                if c: d.tap(*c); log('enter_via', s['template'], c)
+                else: log('enter_via', s['template'], 'not found -> skip')
+            elif s.get('tap'):
+                d.tap(*s['tap']); log('enter_via tap', s['tap'])
+            time.sleep(s.get('wait', 2))
+
     def enter_slot(self, slot_id, timeout=300):
-        c = self.find_slot(slot_id)
-        if not c: log('slot not found'); return False
-        d.tap(*c); t0 = time.time(); lobby_since = None; spin_taps = 0
+        via = (self.p.get('enter_via') or {}).get(slot_id)
+        if via:                                 # slot reached by a fixed sequence (e.g. a tutorial/event-only game), not a grid tile
+            if not self.to_lobby(): log('enter_via: lobby not reached'); return False
+            self._enter_via(via)
+        else:
+            c = self.find_slot(slot_id)
+            if not c: log('slot not found'); return False
+            d.tap(*c)
+        t0 = time.time(); lobby_since = None; spin_taps = 0
         while time.time() - t0 < timeout:
             check_stop()
             time.sleep(3); self.guard_focus(); im = d.grab()
@@ -299,11 +321,14 @@ class App:
                 if act: log('entering:', act); continue
             s, x = self.find_x(im)
             if x: d.tap(*x); log('popup X', x); continue
-            if self.is_lobby(im):               # tile tap did nothing (slot still downloading?) -> retap after 30 s
+            if self.is_lobby(im):               # tap did nothing (slot still downloading?) -> retry after 30 s
                 lobby_since = lobby_since or time.time()
                 if time.time() - lobby_since > 30:
-                    c = self.find_slot(slot_id); lobby_since = None
-                    if c: d.tap(*c); log('re-tap slot tile')
+                    lobby_since = None
+                    if via: self._enter_via(via); log('re-run enter_via')
+                    else:
+                        c = self.find_slot(slot_id)
+                        if c: d.tap(*c); log('re-tap slot tile')
             else: lobby_since = None
         return False
 
